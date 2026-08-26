@@ -1362,17 +1362,33 @@ M30`
       this._historyIndex = -1;
       this._historyLock = false;
       this._syncLock = false;
+      this._typing = false;
+
+      const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) ||
+        (window.matchMedia && window.matchMedia('(max-width: 900px)').matches);
 
       this.editor = CodeMirror.fromTextArea(document.getElementById('gcode-editor'), {
         mode: 'gcode',
         theme: 'dracula',
         lineNumbers: true,
-        lineWrapping: false,
-        styleActiveLine: true,
-        matchBrackets: true,
-        indentUnit: 2,
+        lineWrapping: true,
+        // contenteditable on Android often reorders digits/decimals — use textarea input
+        inputStyle: 'textarea',
+        styleActiveLine: !isMobile,
+        matchBrackets: !isMobile,
+        indentUnit: 0,
         tabSize: 2,
+        indentWithTabs: false,
+        smartIndent: false,
+        electricChars: false,
+        disableInput: false,
+        dragDrop: !isMobile,
+        cursorBlinkRate: isMobile ? 0 : 530,
+        // Avoid CM rewriting / auto-indent while typing G-code
         extraKeys: {
+          'Enter': function (cm) {
+            cm.replaceSelection('\n', 'end');
+          },
           'Ctrl-Enter': () => this._reparse(),
           'Cmd-Enter': () => this._reparse(),
           'Ctrl-Z': () => { this._undo(); return true; },
@@ -1384,6 +1400,17 @@ M30`
         }
       });
 
+      // Kill mobile autocorrect / capitalize (causes G0X3.5 → 5.G0X3 style glitches)
+      const input = this.editor.getInputField();
+      if (input) {
+        input.setAttribute('autocorrect', 'off');
+        input.setAttribute('autocapitalize', 'off');
+        input.setAttribute('autocomplete', 'off');
+        input.setAttribute('spellcheck', 'false');
+        input.setAttribute('inputmode', 'text');
+        input.setAttribute('data-gramm', 'false');
+      }
+
       // Restore autosave
       try {
         const saved = localStorage.getItem('cnc-gcode-autosave');
@@ -1392,20 +1419,34 @@ M30`
         }
       } catch (_) { /* ignore */ }
 
-      this.editor.on('change', () => {
-        if (!this._historyLock) this._pushHistory();
+      this.editor.on('change', (cm, change) => {
+        // Ignore setValue from our own history/load
+        if (this._historyLock) return;
+        this._typing = true;
+        clearTimeout(this._typingTimer);
+        this._typingTimer = setTimeout(() => { this._typing = false; }, 500);
+
+        // Only push history for user origin changes
+        if (change && change.origin && change.origin !== 'setValue') {
+          clearTimeout(this._histTimer);
+          this._histTimer = setTimeout(() => this._pushHistory(), 300);
+        }
+
         clearTimeout(this._parseTimer);
-        this._parseTimer = setTimeout(() => this._reparse(), 400);
+        this._parseTimer = setTimeout(() => this._reparse(), isMobile ? 700 : 450);
         clearTimeout(this._saveTimer);
-        this._saveTimer = setTimeout(() => this._autosave(false), 800);
+        this._saveTimer = setTimeout(() => this._autosave(false), 1000);
       });
 
+      // Debounced cursor→3D sync — never while actively typing
       this.editor.on('cursorActivity', () => {
-        if (this._syncLock) return;
-        this._onEditorCursor();
+        if (this._syncLock || this._typing) return;
+        clearTimeout(this._cursorTimer);
+        this._cursorTimer = setTimeout(() => {
+          if (!this._typing) this._onEditorCursor();
+        }, 350);
       });
 
-      // Seed history
       this._pushHistory();
     },
 
@@ -1454,10 +1495,11 @@ M30`
     },
 
     _onEditorCursor() {
+      if (this._typing || this._syncLock) return;
       if (!this.parseResult || !this.parseResult.segments) return;
+      if (this.simulator && this.simulator.playing) return;
       const line = this.editor.getCursor().line + 1;
       const segs = this.parseResult.segments;
-      // Prefer last segment of that line
       let found = null;
       for (let i = 0; i < segs.length; i++) {
         if (segs[i].lineNum === line) found = { index: i, segment: segs[i] };
@@ -1470,13 +1512,16 @@ M30`
       if (!seg) return;
       this.viewport.highlightSegment(seg);
       this.viewport.setToolPosition(seg.to.x, seg.to.y, seg.to.z);
-      if (scrollEditor && seg.lineNum) {
+      if (scrollEditor && seg.lineNum && !this._typing) {
         this._syncLock = true;
-        this.editor.setCursor(seg.lineNum - 1, 0);
-        this.editor.scrollIntoView({ line: seg.lineNum - 1, ch: 0 }, 80);
-        if (this._hlLine) this.editor.removeLineClass(this._hlLine, 'background', 'cm-sim-line');
-        this._hlLine = this.editor.addLineClass(seg.lineNum - 1, 'background', 'cm-sim-line');
-        this._syncLock = false;
+        try {
+          this.editor.setCursor(seg.lineNum - 1, 0);
+          this.editor.scrollIntoView({ line: seg.lineNum - 1, ch: 0 }, 80);
+          if (this._hlLine) this.editor.removeLineClass(this._hlLine, 'background', 'cm-sim-line');
+          this._hlLine = this.editor.addLineClass(seg.lineNum - 1, 'background', 'cm-sim-line');
+        } finally {
+          this._syncLock = false;
+        }
       }
       document.getElementById('current-line').textContent = seg.raw || '—';
       document.getElementById('pos-x').textContent = seg.to.x.toFixed(3);
@@ -2037,13 +2082,18 @@ M30`
         document.getElementById('info-plane').textContent = planeCode + ' ' + (s.plane || 'XY');
         this._updateActiveToolGeom(s.tool);
 
-        // Highlight line in editor
-        if (s.lineNum) {
-          this.editor.setCursor(s.lineNum - 1, 0);
-          const line = this.editor.getLineHandle(s.lineNum - 1);
-          // clear previous
-          if (this._hlLine) this.editor.removeLineClass(this._hlLine, 'background', 'cm-sim-line');
-          this._hlLine = this.editor.addLineClass(s.lineNum - 1, 'background', 'cm-sim-line');
+        // Highlight line in editor (never while user is typing — breaks mobile input)
+        if (s.lineNum && !this._typing && !this._syncLock) {
+          this._syncLock = true;
+          try {
+            if (this.simulator && this.simulator.playing) {
+              this.editor.setCursor(s.lineNum - 1, 0);
+            }
+            if (this._hlLine) this.editor.removeLineClass(this._hlLine, 'background', 'cm-sim-line');
+            this._hlLine = this.editor.addLineClass(s.lineNum - 1, 'background', 'cm-sim-line');
+          } finally {
+            this._syncLock = false;
+          }
         }
       }
     }
