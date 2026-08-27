@@ -1020,9 +1020,14 @@ M30`
     }
 
     setTool(x, y, z) {
-      if (this.plane === 'xz') this.tool = { u: x, v: z };
-      else if (this.plane === 'yz') this.tool = { u: y, v: z };
-      else this.tool = { u: x, v: y };
+      if (this.plane === 'xz') this.tool = { u: x, v: z, x, y, z };
+      else if (this.plane === 'yz') this.tool = { u: y, v: z, x, y, z };
+      else this.tool = { u: x, v: y, x, y, z };
+      this.draw();
+    }
+
+    setDiameterMode(on) {
+      this.diameterMode = !!on;
       this.draw();
     }
 
@@ -1144,14 +1149,31 @@ M30`
       ctx.closePath();
       ctx.fill();
 
-      ctx.fillStyle = '#64748b';
-      ctx.font = '11px ui-monospace, monospace';
-      const planeLabel = this.plane === 'xz' ? 'X–Z  TRACE' : (this.plane === 'yz' ? 'Y–Z  TRACE' : 'X–Y  TRACE');
-      ctx.fillText(planeLabel, 10, 16);
-      ctx.fillStyle = '#94a3b8';
-      const uN = this.plane === 'yz' ? 'Y' : 'X';
-      const vN = this.plane === 'xy' ? 'Y' : 'Z';
-      ctx.fillText(uN + ' ' + this.tool.u.toFixed(3) + '   ' + vN + ' ' + this.tool.v.toFixed(3), 10, h - 10);
+      // HUD top — never under the bottom coord overlay
+      const planeLabel = this.plane === 'xz' ? 'X–Z TRACE' : (this.plane === 'yz' ? 'Y–Z TRACE' : 'X–Y TRACE');
+      const dia = !!this.diameterMode;
+      let xVal, yVal, zVal;
+      if (this.plane === 'xz') {
+        xVal = this.tool.u; yVal = 0; zVal = this.tool.v;
+      } else if (this.plane === 'yz') {
+        xVal = 0; yVal = this.tool.u; zVal = this.tool.v;
+      } else {
+        xVal = this.tool.u; yVal = this.tool.v; zVal = this.tool.z != null ? this.tool.z : 0;
+      }
+      // Prefer full XYZ if provided
+      if (this.tool.x != null) { xVal = this.tool.x; yVal = this.tool.y; zVal = this.tool.z; }
+
+      const xStr = dia ? (xVal * 2).toFixed(3) + 'Ø' : xVal.toFixed(3);
+      const hud = planeLabel + '   X ' + xStr + '   Y ' + yVal.toFixed(3) + '   Z ' + zVal.toFixed(3);
+
+      ctx.fillStyle = 'rgba(10, 12, 16, 0.82)';
+      ctx.fillRect(8, 6, Math.min(w - 16, ctx.measureText ? 0 : 280), 28);
+      // measure after font set
+      ctx.font = '600 12px ui-monospace, monospace';
+      const tw = ctx.measureText(hud).width + 20;
+      ctx.fillRect(8, 6, Math.min(w - 16, Math.max(tw, 200)), 26);
+      ctx.fillStyle = '#e2e8f0';
+      ctx.fillText(hud, 16, 24);
     }
 
     _drawGrid(ctx, w, h) {
@@ -2264,19 +2286,28 @@ M30`
       this._viewMode = name;
       const traceCanvas = document.getElementById('trace-canvas');
       const planeSel = document.getElementById('trace-plane-select');
+      const overlay = document.querySelector('.viewport-overlay');
       const isTrace = name === 'trace';
       if (traceCanvas) traceCanvas.classList.toggle('hidden', !isTrace);
       if (planeSel) planeSel.classList.toggle('hidden', !isTrace);
-      // Hide three.js canvas while in trace for clarity
+      // Avoid double coords: hide 3D overlay while Trace shows its own HUD
+      if (overlay) overlay.classList.toggle('hidden', isTrace);
       if (this.viewport && this.viewport.renderer) {
         this.viewport.renderer.domElement.style.visibility = isTrace ? 'hidden' : 'visible';
       }
       if (isTrace) {
-        this.trace.resize();
-        if (this.parseResult) {
-          this.trace.setSegments(this.parseResult.segments);
-          const p = this.parser.state;
-          this.trace.setTool(p.x, p.y, p.z);
+        if (this.trace) {
+          const dia = document.getElementById('diameter-mode');
+          this.trace.setDiameterMode(dia && dia.checked);
+          this.trace.resize();
+          if (this.parseResult) {
+            const segs = this._applyWcsToSegments
+              ? this._applyWcsToSegments(this.parseResult.segments)
+              : this.parseResult.segments;
+            this.trace.setSegments(segs);
+            const p = this.parser.state;
+            this.trace.setTool(p.x, p.y, p.z);
+          }
         }
       } else {
         this.viewport.setView(name);
@@ -2335,6 +2366,10 @@ M30`
         if (this.parser) {
           const p = this.parser.state;
           this._updateCoordDisplay(p.x, p.y, p.z);
+        }
+        if (this.trace) {
+          const dia = document.getElementById('diameter-mode');
+          this.trace.setDiameterMode(dia && dia.checked);
         }
       });
 
