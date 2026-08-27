@@ -1,5 +1,5 @@
 /* CNC PathSim Pro — Service Worker */
-const CACHE = 'cnc-pathsim-v3';
+const CACHE = 'cnc-pathsim-v5';
 const ASSETS = [
   './',
   './index.html',
