@@ -371,10 +371,32 @@ body.theme-light .icon-moon { display: none; }
   position: relative;
   overflow: hidden;
 }
-.viewport canvas {
+.viewport > canvas:not(.trace-canvas) {
   display: block;
   width: 100% !important;
   height: 100% !important;
+}
+.trace-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100% !important;
+  height: 100% !important;
+  z-index: 5;
+  background: #0a0c10;
+  touch-action: none;
+  cursor: crosshair;
+}
+.trace-canvas.hidden { display: none !important; }
+.trace-plane-select {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+.trace-plane-select.hidden { display: none !important; }
+.trace-plane-select .btn-sm.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: var(--accent);
 }
 
 .viewport-overlay {

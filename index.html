@@ -92,9 +92,16 @@
         <div class="viewport-toolbar">
           <div class="view-presets">
             <button class="btn-sm" data-view="iso" title="Isométrica">ISO</button>
+            <button class="btn-sm" data-view="plan" title="Vista plano 2D (XY)">Plano</button>
+            <button class="btn-sm" data-view="trace" title="Trace estilo control CNC">Trace</button>
             <button class="btn-sm" data-view="top" title="Superior">Top</button>
             <button class="btn-sm" data-view="front" title="Frontal">Front</button>
             <button class="btn-sm" data-view="side" title="Lateral">Side</button>
+          </div>
+          <div class="trace-plane-select hidden" id="trace-plane-select">
+            <button class="btn-sm active" data-trace-plane="xy" title="Plano XY (fresadora)">XY</button>
+            <button class="btn-sm" data-trace-plane="xz" title="Plano XZ (torno / perfil)">XZ</button>
+            <button class="btn-sm" data-trace-plane="yz" title="Plano YZ">YZ</button>
           </div>
           <div class="view-options">
             <label class="checkbox-label">
@@ -126,7 +133,9 @@
             <span id="z-range-label" class="z-range-label">todo</span>
           </div>
         </div>
-        <div id="viewport" class="viewport"></div>
+        <div id="viewport" class="viewport">
+          <canvas id="trace-canvas" class="trace-canvas hidden"></canvas>
+        </div>
         <div class="viewport-overlay">
           <div class="coord-display">
             <div class="coord"><span class="axis x">X</span><span id="pos-x">0.000</span></div>

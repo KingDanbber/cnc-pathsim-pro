@@ -705,6 +705,257 @@ M30`
   }
 
   // ═══════════════════════════════════════════════════════════
+  //  TRACE 2D (estilo gráfica de control CNC)
+  // ═══════════════════════════════════════════════════════════
+  class TraceView {
+    constructor(canvas) {
+      this.canvas = canvas;
+      this.ctx = canvas.getContext('2d');
+      this.segments = [];
+      this.plane = 'xy';
+      this.tool = { u: 0, v: 0 };
+      this.progress = 1;
+      this.pad = 28;
+      this._bounds = null;
+      this._panU = 0;
+      this._panV = 0;
+      this._zoom = 1;
+      this._dragging = false;
+      this._lastX = 0;
+      this._lastY = 0;
+      this._bindInput();
+    }
+
+    _bindInput() {
+      const c = this.canvas;
+      c.addEventListener('pointerdown', (e) => {
+        this._dragging = true;
+        this._lastX = e.clientX;
+        this._lastY = e.clientY;
+        try { c.setPointerCapture(e.pointerId); } catch (_) {}
+      });
+      c.addEventListener('pointermove', (e) => {
+        if (!this._dragging) return;
+        const dx = e.clientX - this._lastX;
+        const dy = e.clientY - this._lastY;
+        this._lastX = e.clientX;
+        this._lastY = e.clientY;
+        const scale = this._scale || 1;
+        this._panU += dx / scale;
+        this._panV -= dy / scale;
+        this.draw();
+      });
+      c.addEventListener('pointerup', () => { this._dragging = false; });
+      c.addEventListener('pointercancel', () => { this._dragging = false; });
+      c.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        const factor = e.deltaY > 0 ? 0.9 : 1.1;
+        this._zoom = Math.max(0.2, Math.min(20, this._zoom * factor));
+        this.draw();
+      }, { passive: false });
+    }
+
+    setSegments(segments) {
+      this.segments = segments || [];
+      this._bounds = null;
+      this._panU = 0;
+      this._panV = 0;
+      this._zoom = 1;
+      this.draw();
+    }
+
+    setPlane(plane) {
+      this.plane = plane || 'xy';
+      this._bounds = null;
+      this._panU = 0;
+      this._panV = 0;
+      this.draw();
+    }
+
+    setTool(x, y, z) {
+      if (this.plane === 'xz') this.tool = { u: x, v: z };
+      else if (this.plane === 'yz') this.tool = { u: y, v: z };
+      else this.tool = { u: x, v: y };
+      this.draw();
+    }
+
+    setProgress(p) {
+      this.progress = Math.max(0, Math.min(1, p));
+      this.draw();
+    }
+
+    _proj(p) {
+      if (this.plane === 'xz') return { u: p.x, v: p.z };
+      if (this.plane === 'yz') return { u: p.y, v: p.z };
+      return { u: p.x, v: p.y };
+    }
+
+    _computeBounds() {
+      let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
+      this.segments.forEach(s => {
+        [s.from, s.to].forEach(p => {
+          const q = this._proj(p);
+          minU = Math.min(minU, q.u); maxU = Math.max(maxU, q.u);
+          minV = Math.min(minV, q.v); maxV = Math.max(maxV, q.v);
+        });
+      });
+      if (!isFinite(minU)) { minU = -10; maxU = 10; minV = -10; maxV = 10; }
+      const spanU = Math.max(maxU - minU, 1);
+      const spanV = Math.max(maxV - minV, 1);
+      const padU = spanU * 0.12, padV = spanV * 0.12;
+      this._bounds = {
+        minU: minU - padU, maxU: maxU + padU,
+        minV: minV - padV, maxV: maxV + padV,
+        cu: (minU + maxU) / 2, cv: (minV + maxV) / 2,
+        spanU: spanU + 2 * padU, spanV: spanV + 2 * padV
+      };
+    }
+
+    resize() {
+      const parent = this.canvas.parentElement;
+      if (!parent) return;
+      const w = parent.clientWidth, h = parent.clientHeight;
+      if (w < 2 || h < 2) return;
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      this.canvas.width = Math.floor(w * dpr);
+      this.canvas.height = Math.floor(h * dpr);
+      this.canvas.style.width = w + 'px';
+      this.canvas.style.height = h + 'px';
+      this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      this._cssW = w; this._cssH = h;
+      this.draw();
+    }
+
+    _worldToScreen(u, v) {
+      const b = this._bounds;
+      const w = this._cssW || this.canvas.clientWidth;
+      const h = this._cssH || this.canvas.clientHeight;
+      const pad = this.pad;
+      const availW = w - pad * 2, availH = h - pad * 2;
+      const baseScale = Math.min(availW / b.spanU, availH / b.spanV);
+      const scale = baseScale * this._zoom;
+      this._scale = scale;
+      const cu = b.cu - this._panU, cv = b.cv - this._panV;
+      return {
+        x: pad + availW / 2 + (u - cu) * scale,
+        y: pad + availH / 2 - (v - cv) * scale
+      };
+    }
+
+    draw() {
+      const ctx = this.ctx;
+      const w = this._cssW || this.canvas.clientWidth;
+      const h = this._cssH || this.canvas.clientHeight;
+      if (!w || !h) return;
+      if (!this._bounds) this._computeBounds();
+
+      ctx.fillStyle = '#0a0c10';
+      ctx.fillRect(0, 0, w, h);
+      this._drawGrid(ctx, w, h);
+      this._drawAxes(ctx, w, h);
+
+      const n = this.segments.length;
+      const maxI = Math.floor(n * this.progress);
+      for (let i = 0; i < maxI; i++) {
+        const s = this.segments[i];
+        const a = this._proj(s.from), b = this._proj(s.to);
+        const p0 = this._worldToScreen(a.u, a.v);
+        const p1 = this._worldToScreen(b.u, b.v);
+        if (s.type === 'rapid') {
+          ctx.strokeStyle = 'rgba(239, 68, 68, 0.55)';
+          ctx.lineWidth = 1;
+          ctx.setLineDash([4, 3]);
+        } else if (s.type && s.type.startsWith('arc')) {
+          ctx.strokeStyle = '#e879f9';
+          ctx.lineWidth = 1.6;
+          ctx.setLineDash([]);
+        } else {
+          ctx.strokeStyle = '#f0abfc';
+          ctx.lineWidth = 1.6;
+          ctx.setLineDash([]);
+        }
+        ctx.beginPath();
+        ctx.moveTo(p0.x, p0.y);
+        ctx.lineTo(p1.x, p1.y);
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
+
+      const tp = this._worldToScreen(this.tool.u, this.tool.v);
+      ctx.strokeStyle = '#22d3ee';
+      ctx.fillStyle = '#22d3ee';
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.moveTo(tp.x - 8, tp.y); ctx.lineTo(tp.x + 8, tp.y);
+      ctx.moveTo(tp.x, tp.y - 8); ctx.lineTo(tp.x, tp.y + 8);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(tp.x, tp.y - 4);
+      ctx.lineTo(tp.x + 4, tp.y);
+      ctx.lineTo(tp.x, tp.y + 4);
+      ctx.lineTo(tp.x - 4, tp.y);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.fillStyle = '#64748b';
+      ctx.font = '11px ui-monospace, monospace';
+      const planeLabel = this.plane === 'xz' ? 'X–Z  TRACE' : (this.plane === 'yz' ? 'Y–Z  TRACE' : 'X–Y  TRACE');
+      ctx.fillText(planeLabel, 10, 16);
+      ctx.fillStyle = '#94a3b8';
+      const uN = this.plane === 'yz' ? 'Y' : 'X';
+      const vN = this.plane === 'xy' ? 'Y' : 'Z';
+      ctx.fillText(uN + ' ' + this.tool.u.toFixed(3) + '   ' + vN + ' ' + this.tool.v.toFixed(3), 10, h - 10);
+    }
+
+    _drawGrid(ctx, w, h) {
+      const b = this._bounds;
+      if (!b) return;
+      const scale = this._scale || 1;
+      const worldStep = this._niceStep(40 / (scale || 1));
+      ctx.strokeStyle = 'rgba(51, 65, 85, 0.45)';
+      ctx.lineWidth = 1;
+      const u0 = Math.floor(b.minU / worldStep) * worldStep;
+      const v0 = Math.floor(b.minV / worldStep) * worldStep;
+      for (let u = u0; u <= b.maxU + worldStep; u += worldStep) {
+        const p0 = this._worldToScreen(u, b.minV);
+        const p1 = this._worldToScreen(u, b.maxV);
+        ctx.beginPath(); ctx.moveTo(p0.x, p0.y); ctx.lineTo(p1.x, p1.y); ctx.stroke();
+      }
+      for (let v = v0; v <= b.maxV + worldStep; v += worldStep) {
+        const p0 = this._worldToScreen(b.minU, v);
+        const p1 = this._worldToScreen(b.maxU, v);
+        ctx.beginPath(); ctx.moveTo(p0.x, p0.y); ctx.lineTo(p1.x, p1.y); ctx.stroke();
+      }
+    }
+
+    _niceStep(raw) {
+      if (!isFinite(raw) || raw <= 0) return 10;
+      const pow = Math.pow(10, Math.floor(Math.log10(raw)));
+      const n = raw / pow;
+      if (n < 1.5) return pow;
+      if (n < 3.5) return 2 * pow;
+      if (n < 7.5) return 5 * pow;
+      return 10 * pow;
+    }
+
+    _drawAxes(ctx, w, h) {
+      const origin = this._worldToScreen(0, 0);
+      ctx.strokeStyle = 'rgba(148, 163, 184, 0.55)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([6, 4]);
+      ctx.beginPath(); ctx.moveTo(0, origin.y); ctx.lineTo(w, origin.y); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(origin.x, 0); ctx.lineTo(origin.x, h); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = '#64748b';
+      ctx.font = '10px ui-monospace, monospace';
+      const uName = this.plane === 'yz' ? 'Y' : 'X';
+      const vName = this.plane === 'xy' ? 'Y' : 'Z';
+      ctx.fillText(uName + '→', w - 24, Math.min(Math.max(origin.y - 4, 12), h - 4));
+      ctx.fillText(vName + '↑', Math.min(Math.max(origin.x + 4, 4), w - 24), 14);
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════
   //  3D VIEWPORT
   // ═══════════════════════════════════════════════════════════
   class Viewport3D {
@@ -772,31 +1023,47 @@ M30`
     _setupTool() {
       if (this.toolMesh) this.scene.remove(this.toolMesh);
       this.toolMesh = new THREE.Group();
-      const cone = new THREE.Mesh(
-        new THREE.ConeGeometry(1.2, 6, 12),
-        new THREE.MeshStandardMaterial({
-          color: 0xf59e0b, metalness: 0.6, roughness: 0.3,
-          emissive: 0xf59e0b, emissiveIntensity: 0.15
-        })
+      const mat = new THREE.MeshStandardMaterial({
+        color: 0xf59e0b, metalness: 0.55, roughness: 0.35,
+        emissive: 0xf59e0b, emissiveIntensity: 0.12
+      });
+      // Compact cutter: short tip + small shank (visual scale, not 1:1 mm)
+      const tip = new THREE.Mesh(new THREE.ConeGeometry(0.6, 2.2, 12), mat);
+      tip.rotation.x = Math.PI;
+      tip.position.y = 1.1;
+      const shank = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.35, 0.45, 2.5, 10),
+        mat.clone()
       );
-      cone.rotation.x = Math.PI;
-      cone.position.y = 0;
-      this.toolMesh.add(cone);
-      this.toolMesh.userData.cone = cone;
+      shank.position.y = 3.3;
+      this.toolMesh.add(tip);
+      this.toolMesh.add(shank);
+      this.toolMesh.userData.tip = tip;
+      this.toolMesh.userData.shank = shank;
       this.scene.add(this.toolMesh);
     }
 
     setToolGeometry(diameter, length) {
       if (!this.toolMesh) return;
-      const cone = this.toolMesh.userData.cone;
-      if (!cone) return;
-      const r = Math.max((diameter || 6) / 2, 0.3);
-      const h = Math.max(length || 20, 4);
-      cone.geometry.dispose();
-      cone.geometry = new THREE.ConeGeometry(r, h, 16);
-      cone.rotation.x = Math.PI;
-      // tip at tool position: cone height along +Y in local after rotation means tip at origin
-      cone.position.y = h / 2;
+      const tip = this.toolMesh.userData.tip;
+      const shank = this.toolMesh.userData.shank;
+      if (!tip || !shank) return;
+
+      // Visual scale: real mm → scene units (keep tool small relative to path)
+      const scale = 0.12;
+      const r = Math.max(((diameter || 6) / 2) * scale, 0.25);
+      const tipH = Math.max(Math.min((length || 30) * scale * 0.25, 3.5), 1.2);
+      const shankH = Math.max(Math.min((length || 30) * scale * 0.35, 4.5), 1.5);
+      const shankR = r * 0.55;
+
+      tip.geometry.dispose();
+      tip.geometry = new THREE.ConeGeometry(r, tipH, 14);
+      tip.rotation.x = Math.PI;
+      tip.position.y = tipH / 2;
+
+      shank.geometry.dispose();
+      shank.geometry = new THREE.CylinderGeometry(shankR * 0.85, shankR, shankH, 10);
+      shank.position.y = tipH + shankH / 2;
     }
 
     setBackground(isDark) {
@@ -1086,31 +1353,88 @@ M30`
       const cy = (minY + maxY) / 2;
       const cz = (minZ + maxZ) / 2;
       const size = Math.max(maxX - minX, maxY - minY, maxZ - minZ, 20);
+      this._pathSize = size;
       const dist = size * 1.8;
 
       // Map: CNC X → Three X, CNC Z → Three Y, CNC Y → Three -Z
       this.controls.target.set(cx, cz, -cy);
-      this.camera.position.set(cx + dist * 0.7, cz + dist * 0.6, -cy + dist * 0.7);
-      this.controls.update();
+      if (this._viewMode === 'plan') {
+        this.setView('plan');
+      } else {
+        this.camera.position.set(cx + dist * 0.7, cz + dist * 0.6, -cy + dist * 0.7);
+        this.controls.update();
+      }
     }
 
     setView(name) {
-      const t = this.controls.target;
-      const d = 80;
-      switch (name) {
-        case 'top':
-          this.camera.position.set(t.x, t.y + d, t.z);
-          break;
-        case 'front':
-          this.camera.position.set(t.x, t.y, t.z + d);
-          break;
-        case 'side':
-          this.camera.position.set(t.x + d, t.y, t.z);
-          break;
-        default: // iso
-          this.camera.position.set(t.x + d * 0.7, t.y + d * 0.55, t.z + d * 0.7);
+      this._viewMode = name;
+      const t = this.controls.target.clone();
+      const size = this._pathSize || 80;
+      const d = Math.max(size * 1.4, 40);
+
+      // Toggle orthographic for true 2D plan view
+      if (name === 'plan') {
+        this._useOrtho(true, d);
+        this.camera.up.set(0, 0, -1); // look down so X right, Y up on screen roughly
+        // Scene: X=X, Y=Z, Z=-Y → top view from +Y
+        this.camera.up.set(0, 0, -1);
+        this.camera.position.set(t.x, t.y + d, t.z);
+        this.controls.enableRotate = false;
+        this.controls.screenSpacePanning = true;
+      } else {
+        this._useOrtho(false, d);
+        this.controls.enableRotate = true;
+        if (this.machineType === 'hmc') this.camera.up.set(0, 0, 1);
+        else this.camera.up.set(0, 1, 0);
+
+        switch (name) {
+          case 'top':
+            this.camera.position.set(t.x, t.y + d, t.z);
+            break;
+          case 'front':
+            this.camera.position.set(t.x, t.y, t.z + d);
+            break;
+          case 'side':
+            this.camera.position.set(t.x + d, t.y, t.z);
+            break;
+          default: // iso
+            this.camera.position.set(t.x + d * 0.7, t.y + d * 0.55, t.z + d * 0.7);
+        }
       }
+      this.camera.lookAt(t);
+      this.controls.target.copy(t);
       this.controls.update();
+    }
+
+    _useOrtho(on, frustumSize) {
+      const el = this.container;
+      const w = Math.max(el.clientWidth, 1);
+      const h = Math.max(el.clientHeight, 1);
+      const aspect = w / h;
+      const fs = frustumSize || 80;
+
+      if (on) {
+        if (!(this.camera.isOrthographicCamera)) {
+          this._perspCamera = this.camera;
+          this.camera = new THREE.OrthographicCamera(
+            -fs * aspect / 2, fs * aspect / 2, fs / 2, -fs / 2, 0.1, 5000
+          );
+          this.controls.object = this.camera;
+        } else {
+          this.camera.left = -fs * aspect / 2;
+          this.camera.right = fs * aspect / 2;
+          this.camera.top = fs / 2;
+          this.camera.bottom = -fs / 2;
+          this.camera.updateProjectionMatrix();
+        }
+      } else {
+        if (this.camera.isOrthographicCamera) {
+          this.camera = this._perspCamera || new THREE.PerspectiveCamera(50, aspect, 0.1, 5000);
+          this.controls.object = this.camera;
+        }
+        this.camera.aspect = aspect;
+        this.camera.updateProjectionMatrix();
+      }
     }
 
     setToolPosition(x, y, z) {
@@ -1199,7 +1523,16 @@ M30`
       const w = this.container.clientWidth;
       const h = this.container.clientHeight;
       if (w === 0 || h === 0) return;
-      this.camera.aspect = w / h;
+      const aspect = w / h;
+      if (this.camera.isOrthographicCamera) {
+        const fs = this._pathSize ? this._pathSize * 1.4 : 80;
+        this.camera.left = -fs * aspect / 2;
+        this.camera.right = fs * aspect / 2;
+        this.camera.top = fs / 2;
+        this.camera.bottom = -fs / 2;
+      } else {
+        this.camera.aspect = aspect;
+      }
       this.camera.updateProjectionMatrix();
       this.renderer.setSize(w, h);
     }
@@ -1533,6 +1866,35 @@ M30`
       const el = document.getElementById('viewport');
       this.viewport = new Viewport3D(el);
       this.viewport.setBackground(true);
+      const tc = document.getElementById('trace-canvas');
+      this.trace = new TraceView(tc);
+      this._viewMode = 'iso';
+      window.addEventListener('resize', () => {
+        if (this._viewMode === 'trace') this.trace.resize();
+      });
+    },
+
+    _setViewMode(name) {
+      this._viewMode = name;
+      const traceCanvas = document.getElementById('trace-canvas');
+      const planeSel = document.getElementById('trace-plane-select');
+      const isTrace = name === 'trace';
+      if (traceCanvas) traceCanvas.classList.toggle('hidden', !isTrace);
+      if (planeSel) planeSel.classList.toggle('hidden', !isTrace);
+      // Hide three.js canvas while in trace for clarity
+      if (this.viewport && this.viewport.renderer) {
+        this.viewport.renderer.domElement.style.visibility = isTrace ? 'hidden' : 'visible';
+      }
+      if (isTrace) {
+        this.trace.resize();
+        if (this.parseResult) {
+          this.trace.setSegments(this.parseResult.segments);
+          const p = this.parser.state;
+          this.trace.setTool(p.x, p.y, p.z);
+        }
+      } else {
+        this.viewport.setView(name);
+      }
     },
 
     _initSimulator() {
@@ -1712,7 +2074,18 @@ M30`
 
       // View presets
       document.querySelectorAll('[data-view]').forEach(btn => {
-        btn.addEventListener('click', () => this.viewport.setView(btn.dataset.view));
+        btn.addEventListener('click', () => {
+          document.querySelectorAll('[data-view]').forEach(b => b.classList.remove('active'));
+          btn.classList.add('active');
+          this._setViewMode(btn.dataset.view);
+        });
+      });
+      document.querySelectorAll('[data-trace-plane]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          document.querySelectorAll('[data-trace-plane]').forEach(b => b.classList.remove('active'));
+          btn.classList.add('active');
+          if (this.trace) this.trace.setPlane(btn.dataset.tracePlane);
+        });
       });
 
       // Drag & drop
@@ -1912,6 +2285,11 @@ M30`
         this.viewport.updateStock(bbox);
         this.simulator.load(segments);
         this._updateActiveToolGeom();
+        if (this.trace) {
+          this.trace.setSegments(segments);
+          this.trace.setProgress(1);
+          if (this._viewMode === 'trace') this.trace.resize();
+        }
 
         // Stats
         document.getElementById('stat-moves').textContent = stats.moves;
@@ -2056,6 +2434,7 @@ M30`
         document.getElementById('pos-z').textContent = p.z.toFixed(3);
         document.getElementById('pos-a').textContent = (p.a || 0).toFixed(3);
         document.getElementById('pos-c').textContent = (p.c || 0).toFixed(3);
+        if (this.trace) this.trace.setTool(p.x, p.y, p.z);
       }
 
       if (data.total !== undefined) {
@@ -2063,6 +2442,7 @@ M30`
         document.getElementById('progress-fill').style.width = pct + '%';
         document.getElementById('progress-line').textContent = `Línea ${data.index} / ${data.total}`;
         document.getElementById('progress-pct').textContent = pct.toFixed(0) + '%';
+        if (this.trace && data.total) this.trace.setProgress(data.index / data.total);
       }
 
       if (data.segment) {
