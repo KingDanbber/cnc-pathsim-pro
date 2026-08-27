@@ -38,6 +38,7 @@
           <button class="tab active" data-machine="vmc" title="Vertical Machining Center">VMC</button>
           <button class="tab" data-machine="hmc" title="Horizontal Machining Center">HMC</button>
           <button class="tab" data-machine="5axis" title="Centro de 5 Ejes">5 Ejes</button>
+          <button class="tab" data-machine="lathe" title="Torno CNC">Torno</button>
         </nav>
       </div>
       <div class="header-right">
@@ -48,6 +49,10 @@
         <button id="btn-export" class="btn btn-ghost" title="Exportar toolpath">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
           <span class="btn-text">Exportar</span>
+        </button>
+        <button id="btn-templates" class="btn btn-ghost" title="Plantillas">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+          <span class="btn-text">Plantillas</span>
         </button>
         <button id="btn-examples" class="btn btn-ghost" title="Ejemplos">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
@@ -169,6 +174,9 @@
             <button id="btn-step-fwd" class="btn btn-icon" title="Paso adelante">
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 4 15 12 5 20 5 4"/><line x1="19" y1="5" x2="19" y2="19"/></svg>
             </button>
+            <button id="btn-stop" class="btn btn-icon" title="Detener">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>
+            </button>
           </div>
           <div class="speed-control">
             <label>Velocidad</label>
@@ -221,6 +229,43 @@
               <span class="value" id="info-wcs">G54</span>
             </div>
           </div>
+        </div>
+
+        <!-- WCS Offsets G54-G59 -->
+        <div class="info-section">
+          <h3>Offsets WCS</h3>
+          <div class="wcs-table-wrap">
+            <table class="tool-table" id="wcs-table">
+              <thead><tr><th></th><th>X</th><th>Y</th><th>Z</th></tr></thead>
+              <tbody id="wcs-tbody">
+                <tr data-wcs="G54"><td><label><input type="radio" name="wcs-active" value="G54" checked /> G54</label></td>
+                  <td><input type="number" class="wcs-x" value="0" step="0.1"/></td>
+                  <td><input type="number" class="wcs-y" value="0" step="0.1"/></td>
+                  <td><input type="number" class="wcs-z" value="0" step="0.1"/></td></tr>
+                <tr data-wcs="G55"><td><label><input type="radio" name="wcs-active" value="G55" /> G55</label></td>
+                  <td><input type="number" class="wcs-x" value="0" step="0.1"/></td>
+                  <td><input type="number" class="wcs-y" value="0" step="0.1"/></td>
+                  <td><input type="number" class="wcs-z" value="0" step="0.1"/></td></tr>
+                <tr data-wcs="G56"><td><label><input type="radio" name="wcs-active" value="G56" /> G56</label></td>
+                  <td><input type="number" class="wcs-x" value="0" step="0.1"/></td>
+                  <td><input type="number" class="wcs-y" value="0" step="0.1"/></td>
+                  <td><input type="number" class="wcs-z" value="0" step="0.1"/></td></tr>
+                <tr data-wcs="G57"><td><label><input type="radio" name="wcs-active" value="G57" /> G57</label></td>
+                  <td><input type="number" class="wcs-x" value="0" step="0.1"/></td>
+                  <td><input type="number" class="wcs-y" value="0" step="0.1"/></td>
+                  <td><input type="number" class="wcs-z" value="0" step="0.1"/></td></tr>
+                <tr data-wcs="G58"><td><label><input type="radio" name="wcs-active" value="G58" /> G58</label></td>
+                  <td><input type="number" class="wcs-x" value="0" step="0.1"/></td>
+                  <td><input type="number" class="wcs-y" value="0" step="0.1"/></td>
+                  <td><input type="number" class="wcs-z" value="0" step="0.1"/></td></tr>
+                <tr data-wcs="G59"><td><label><input type="radio" name="wcs-active" value="G59" /> G59</label></td>
+                  <td><input type="number" class="wcs-x" value="0" step="0.1"/></td>
+                  <td><input type="number" class="wcs-y" value="0" step="0.1"/></td>
+                  <td><input type="number" class="wcs-z" value="0" step="0.1"/></td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="tool-hint">Offsets se suman a la trayectoria visual. G54–G59 del programa también cambian el activo.</p>
         </div>
 
         <!-- Stats -->
@@ -284,6 +329,17 @@
           <p class="tool-hint">G41/G42 usa Ø/2. El cono 3D sigue a T activa.</p>
         </div>
 
+        <!-- Alarms / Validation -->
+        <div class="info-section">
+          <h3>Alarmas <span id="alarm-count" class="alarm-badge">0</span></h3>
+          <div id="alarms-list" class="alarms-list">
+            <div class="alarm-empty">Sin alarmas</div>
+          </div>
+          <label class="checkbox-label" style="margin-top:8px;">
+            <input type="checkbox" id="diameter-mode" /> Modo diámetro (Torno X)
+          </label>
+        </div>
+
         <!-- Current Line -->
         <div class="info-section">
           <h3>Línea Actual</h3>
@@ -321,7 +377,58 @@
           <button class="example-btn" data-example="g18arc">Arcos G18 (XZ)</button>
           <button class="example-btn" data-example="comp">Contorno G41 compensación</button>
           <button class="example-btn" data-example="5axis">Trayectoria 5 Ejes (sim)</button>
+          <button class="example-btn" data-example="m98">Subprograma M98/M99</button>
           <button class="example-btn" data-example="hmc">Cara HMC + Índice</button>
+          <button class="example-btn" data-example="lathe">Torno — perfil + G71 visual</button>
+          <button class="example-btn" data-example="latheface">Torno — refrentado G72</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Templates Modal -->
+    <div id="templates-modal" class="modal hidden">
+      <div class="modal-backdrop" data-close="templates"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2>Plantillas</h2>
+          <button class="btn-close" id="templates-close">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div class="tpl-tabs">
+            <button class="btn-sm active" data-tpl="face">Careado VMC</button>
+            <button class="btn-sm" data-tpl="pocket">Cavidad</button>
+            <button class="btn-sm" data-tpl="lathe">Desbaste Torno</button>
+          </div>
+
+          <div class="tpl-form" id="tpl-face">
+            <label>Largo X (mm) <input type="number" id="tpl-face-x" value="100" step="1" /></label>
+            <label>Ancho Y (mm) <input type="number" id="tpl-face-y" value="60" step="1" /></label>
+            <label>Z final (mm) <input type="number" id="tpl-face-z" value="-0.5" step="0.1" /></label>
+            <label>Paso Y (mm) <input type="number" id="tpl-face-step" value="8" step="0.5" /></label>
+            <label>Feed (mm/min) <input type="number" id="tpl-face-f" value="800" step="10" /></label>
+            <label>S (rpm) <input type="number" id="tpl-face-s" value="6000" step="100" /></label>
+            <label>Herramienta T <input type="number" id="tpl-face-t" value="1" step="1" min="1" /></label>
+          </div>
+
+          <div class="tpl-form hidden" id="tpl-pocket">
+            <label>Largo X (mm) <input type="number" id="tpl-pok-x" value="40" step="1" /></label>
+            <label>Ancho Y (mm) <input type="number" id="tpl-pok-y" value="25" step="1" /></label>
+            <label>Profundidad Z <input type="number" id="tpl-pok-z" value="-5" step="0.5" /></label>
+            <label>Paso Z (mm) <input type="number" id="tpl-pok-stepz" value="2.5" step="0.5" /></label>
+            <label>Feed <input type="number" id="tpl-pok-f" value="400" step="10" /></label>
+            <label>S (rpm) <input type="number" id="tpl-pok-s" value="8000" step="100" /></label>
+          </div>
+
+          <div class="tpl-form hidden" id="tpl-lathe">
+            <label>Ø stock (mm) <input type="number" id="tpl-lat-od" value="40" step="0.5" /></label>
+            <label>Ø final (mm) <input type="number" id="tpl-lat-id" value="28" step="0.5" /></label>
+            <label>Longitud Z (mm) <input type="number" id="tpl-lat-z" value="-30" step="1" /></label>
+            <label>Paso U (mm) <input type="number" id="tpl-lat-u" value="1.5" step="0.1" /></label>
+            <label>Feed <input type="number" id="tpl-lat-f" value="0.2" step="0.05" /></label>
+            <label>S (rpm) <input type="number" id="tpl-lat-s" value="1200" step="50" /></label>
+          </div>
+
+          <button id="btn-gen-template" class="btn btn-primary" style="width:100%;margin-top:12px;">Generar G-Code</button>
         </div>
       </div>
     </div>

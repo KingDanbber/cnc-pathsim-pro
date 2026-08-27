@@ -294,6 +294,64 @@ G1 X5 Y5
 G40
 G0 Z30
 M5
+M30`,
+
+    lathe: `; Torno — perfil exterior + G71 visual
+; X = diámetro (modo diámetro en panel)
+G21 G90 G18
+G54
+T1 M6
+S1200 M3
+G0 X42 Z5
+; Desbaste G71 (U = paso radial visual)
+G71 U1.5 R0.5
+G71 P10 Q20 U0.4 W0.1 F0.2
+N10 G0 X28
+G1 Z-25 F0.15
+G1 X32 Z-28
+G1 Z-35
+G1 X40
+N20 G0 X42
+G0 Z5
+M5
+M30`,
+
+    m98: `; Subprograma M98/M99
+G21 G90 G17
+G54
+T1 M6
+S5000 M3
+G0 X0 Y0 Z30
+M98 P1000 L2
+G0 Z30
+M5
+M30
+
+O1000
+G0 X10 Y10 Z5
+G1 Z-2 F200
+G1 X30 F400
+G1 Y30
+G1 X10
+G1 Y10
+G0 Z5
+M99
+`,
+
+    latheface: `; Torno — refrentado G72 visual
+G21 G90 G18
+G54
+T1 M6
+S1000 M3
+G0 X45 Z2
+G72 W1.0 R0.5
+G72 P30 Q40 U0.2 W0.1 F0.2
+N30 G0 Z-2
+G1 X20 F0.15
+G1 Z0
+N40 G0 X45
+G0 Z5
+M5
 M30`
   };
 
@@ -326,7 +384,10 @@ M30`
         cycleQ: 0,
         cycleP: 0,
         retractInitial: true,
-        initialZ: 0
+        initialZ: 0,
+        latheU: 0,   // G71 depth of cut (radius)
+        latheW: 0,   // G72 depth of cut (Z)
+        latheMode: null // 'G71' | 'G72' | null
       };
       this.segments = [];
       this.stats = { moves: 0, distance: 0, rapids: 0, cuts: 0, arcs: 0, cycles: 0, dwellSec: 0 };
@@ -335,7 +396,9 @@ M30`
 
     parse(text) {
       this.reset();
-      const lines = text.split(/\r?\n/);
+      // Expand M98/M99 subprograms first
+      const expanded = this._expandSubprograms(text);
+      const lines = expanded.split(/\r?\n/);
       const result = [];
 
       for (let li = 0; li < lines.length; li++) {
@@ -347,6 +410,20 @@ M30`
         }
 
         const words = this._parseWords(cleaned);
+        // Skip O numbers / M99 as pure meta after expansion
+        if (words.O !== undefined && Object.keys(words).length === 1) {
+          result.push({ lineNum: li + 1, raw, type: 'meta', words });
+          continue;
+        }
+        if (words.M === 99) {
+          result.push({ lineNum: li + 1, raw, type: 'meta', words });
+          continue;
+        }
+        if (words.M === 98) {
+          result.push({ lineNum: li + 1, raw, type: 'meta', words });
+          continue;
+        }
+
         const segs = this._interpret(words, li + 1, raw);
         if (segs && segs.length) {
           segs.forEach(seg => this.segments.push(seg));
@@ -356,6 +433,114 @@ M30`
         }
       }
       return { segments: this.segments, lines: result, stats: this.stats, bbox: this.bbox, state: { ...this.state } };
+    }
+
+    /**
+     * Expand M98 Pxxxx Lnn / M99 subprograms in one file.
+     * Supports O1000 ... M99 blocks and N1000 labels as entry.
+     */
+    _expandSubprograms(text) {
+      const src = text.split(/\r?\n/);
+      // Index O-numbers and also lines that start with N#### when used as sub
+      const oMap = {}; // oNum -> { start, end }
+      for (let i = 0; i < src.length; i++) {
+        const c = src[i].replace(/;.*$/, '').replace(/\(.*?\)/g, '').trim();
+        const om = c.match(/^O(\d+)/i) || c.match(/\bO(\d+)/i);
+        if (om) {
+          const num = parseInt(om[1], 10);
+          if (!oMap[num]) oMap[num] = { start: i, end: -1 };
+        }
+        if (/\bM99\b/i.test(c)) {
+          // close nearest open O without end
+          const keys = Object.keys(oMap).map(Number).sort((a, b) => oMap[b].start - oMap[a].start);
+          for (const k of keys) {
+            if (oMap[k].end < 0 && oMap[k].start < i) {
+              oMap[k].end = i;
+              break;
+            }
+          }
+        }
+      }
+      // Fallback: if O has no M99, end at next O or EOF
+      const oNums = Object.keys(oMap).map(Number).sort((a, b) => oMap[a].start - oMap[b].start);
+      for (let i = 0; i < oNums.length; i++) {
+        const n = oNums[i];
+        if (oMap[n].end < 0) {
+          oMap[n].end = i + 1 < oNums.length ? oMap[oNums[i + 1]].start - 1 : src.length - 1;
+        }
+      }
+
+      const out = [];
+      const expandLine = (i, depth) => {
+        if (depth > 8) {
+          out.push('; ERROR: subprogram recursion limit');
+          return;
+        }
+        if (i < 0 || i >= src.length) return;
+        const raw = src[i];
+        const cleaned = raw.replace(/;.*$/, '').replace(/\(.*?\)/g, '').trim();
+        const words = this._parseWords(cleaned);
+        if (words.M === 98 && words.P !== undefined) {
+          // P can be 1000 or 01000; L = repeats
+          let p = words.P;
+          // Fanuc sometimes encodes L in P as Pllllpppp — keep simple: P = program
+          const prog = Math.floor(p) % 10000; // allow Pxxxyyyy forms partially
+          const pStr = String(Math.floor(p));
+          let oNum = Math.floor(p);
+          if (pStr.length > 4) oNum = parseInt(pStr.slice(-4), 10);
+          const reps = words.L !== undefined ? Math.max(1, Math.floor(words.L)) : 1;
+          const block = oMap[oNum];
+          out.push(raw + ' ; CALL O' + oNum + ' x' + reps);
+          if (block) {
+            for (let r = 0; r < reps; r++) {
+              for (let j = block.start; j <= block.end; j++) {
+                const line = src[j];
+                const cc = line.replace(/;.*$/, '').replace(/\(.*?\)/g, '').trim();
+                if (/\bM99\b/i.test(cc)) break;
+                if (/^\s*O\d+/i.test(cc)) continue;
+                // nested M98
+                const w2 = this._parseWords(cc);
+                if (w2.M === 98) {
+                  expandLine(j, depth + 1);
+                } else {
+                  out.push(line);
+                }
+              }
+            }
+          } else {
+            out.push('; WARN: subprograma O' + oNum + ' no encontrado');
+          }
+          return;
+        }
+        if (words.M === 99) return; // don't emit return in main expansion of body
+        out.push(raw);
+      };
+
+      // Main program = lines before first O, or all lines that aren't inside O blocks only for main
+      // Strategy: walk all lines; if inside an O body at depth 0 of main file, skip until called
+      const inSub = new Array(src.length).fill(false);
+      Object.keys(oMap).forEach(k => {
+        const b = oMap[k];
+        for (let j = b.start; j <= b.end; j++) inSub[j] = true;
+      });
+
+      for (let i = 0; i < src.length; i++) {
+        if (inSub[i]) {
+          // still allow M98 in main only — skip O bodies in main stream
+          const cleaned = src[i].replace(/;.*$/, '').replace(/\(.*?\)/g, '').trim();
+          // keep O headers as comments in expanded for clarity? skip
+          continue;
+        }
+        expandLine(i, 0);
+      }
+      // If entire file is only subprograms + calls... also if no main content, expand any top-level M98 already handled
+
+      // If file has no "main" (all inSub), run from start including O0 style — fallback: process all with expand but skip O definitions until called
+      if (out.length === 0) {
+        for (let i = 0; i < src.length; i++) expandLine(i, 0);
+      }
+
+      return out.join('\n');
     }
 
     _parseWords(line) {
@@ -548,6 +733,20 @@ M30`
           this._activateCycle(g, words);
           changed = true;
         }
+        else if (g === 71) {
+          // Lathe roughing turning — U = DOC (radius)
+          s.latheMode = 'G71';
+          if (words.U !== undefined) s.latheU = Math.abs(words.U);
+          if (words.W !== undefined) s.latheW = Math.abs(words.W);
+          changed = true;
+        }
+        else if (g === 72) {
+          // Lathe facing roughing — W = DOC in Z
+          s.latheMode = 'G72';
+          if (words.W !== undefined) s.latheW = Math.abs(words.W);
+          if (words.U !== undefined) s.latheU = Math.abs(words.U);
+          changed = true;
+        }
         else if (g >= 54 && g <= 59) { s.wcs = 'G' + g; }
       }
       if (words.D !== undefined) s.compD = words.D;
@@ -635,6 +834,54 @@ M30`
       let arc = null;
       if (type.startsWith('arc')) {
         arc = this._computeArc(from, to, words, type, s.plane);
+      }
+
+      // Visual expansion G71/G72 (approximate multi-pass)
+      if (type === 'cut' && s.latheMode === 'G71' && s.latheU > 0) {
+        const dx = to.x - from.x;
+        // X decreases toward axis (diameter or radius programming: treat as coordinate)
+        if (dx < -s.latheU * 0.5) {
+          const segs = [];
+          let cur = { ...from };
+          const steps = Math.max(1, Math.ceil(Math.abs(dx) / s.latheU));
+          for (let i = 1; i <= steps; i++) {
+            const t = i / steps;
+            const nx = from.x + dx * t;
+            const nz = from.z + (to.z - from.z) * t;
+            const ny = from.y + (to.y - from.y) * t;
+            const next = { x: nx, y: ny, z: nz, a: to.a, c: to.c };
+            // Cut at intermediate X, then small retract in Z style
+            segs.push(this._makeSeg(lineNum, raw, 'cut', cur, next, {
+              words, plane: s.plane, tool: s.tool, feed: s.f, lathe: 'G71'
+            }));
+            cur = next;
+          }
+          this.stats.cycles++;
+          return segs;
+        }
+      }
+      if (type === 'cut' && s.latheMode === 'G72' && s.latheW > 0) {
+        const dz = to.z - from.z;
+        if (Math.abs(dz) > s.latheW * 0.5) {
+          const segs = [];
+          let cur = { ...from };
+          const steps = Math.max(1, Math.ceil(Math.abs(dz) / s.latheW));
+          for (let i = 1; i <= steps; i++) {
+            const t = i / steps;
+            const next = {
+              x: from.x + (to.x - from.x) * t,
+              y: from.y + (to.y - from.y) * t,
+              z: from.z + dz * t,
+              a: to.a, c: to.c
+            };
+            segs.push(this._makeSeg(lineNum, raw, 'cut', cur, next, {
+              words, plane: s.plane, tool: s.tool, feed: s.f, lathe: 'G72'
+            }));
+            cur = next;
+          }
+          this.stats.cycles++;
+          return segs;
+        }
       }
 
       const seg = this._makeSeg(lineNum, raw, type, from, to, {
@@ -1449,6 +1696,7 @@ M30`
     setStockVisible(v) {
       this.showStock = v;
       if (this.stockMesh) this.stockMesh.visible = v;
+      if (this.stockSurface) this.stockSurface.visible = v;
     }
 
     updateStock(bbox, padding) {
@@ -1461,6 +1709,12 @@ M30`
         }
         this.stockMesh = null;
       }
+      if (this.stockSurface) {
+        this.scene.remove(this.stockSurface);
+        if (this.stockSurface.geometry) this.stockSurface.geometry.dispose();
+        if (this.stockSurface.material) this.stockSurface.material.dispose();
+        this.stockSurface = null;
+      }
       if (!bbox || !isFinite(bbox.min.x)) return;
 
       const pad = padding != null ? padding : 5;
@@ -1468,7 +1722,6 @@ M30`
       const maxX = bbox.max.x + pad;
       const minY = bbox.min.y - pad;
       const maxY = bbox.max.y + pad;
-      // Stock from Z=0 (table) down to min Z with margin, or full range if all positive
       let minZ = Math.min(bbox.min.z, 0) - 1;
       let maxZ = Math.max(bbox.max.z, 0);
       if (bbox.min.z < 0) {
@@ -1486,12 +1739,13 @@ M30`
       const cy = (minY + maxY) / 2;
       const cz = (minZ + maxZ) / 2;
 
-      // Three.js: X=X, Y=Z, Z=-Y
+      this._stockBounds = { minX, maxX, minY, maxY, minZ, maxZ, topZ: maxZ };
+
       const geo = new THREE.BoxGeometry(sx, sz, sy);
       const mat = new THREE.MeshStandardMaterial({
         color: 0x6b7280,
         transparent: true,
-        opacity: 0.22,
+        opacity: 0.12,
         metalness: 0.1,
         roughness: 0.85,
         depthWrite: false,
@@ -1500,14 +1754,146 @@ M30`
       this.stockMesh = new THREE.Mesh(geo, mat);
       this.stockMesh.position.set(cx, cz, -cy);
       this.stockMesh.visible = this.showStock;
-
-      // Edge outline
       const edges = new THREE.EdgesGeometry(geo);
-      const edgeMat = new THREE.LineBasicMaterial({ color: 0x9ca3af, transparent: true, opacity: 0.45 });
-      const edgeLines = new THREE.LineSegments(edges, edgeMat);
-      this.stockMesh.add(edgeLines);
-
+      const edgeMat = new THREE.LineBasicMaterial({ color: 0x9ca3af, transparent: true, opacity: 0.4 });
+      this.stockMesh.add(new THREE.LineSegments(edges, edgeMat));
       this.scene.add(this.stockMesh);
+
+      // Heightmap surface for material removal (top of stock)
+      this._initStockHeightmap(minX, maxX, minY, maxY, maxZ, minZ);
+    }
+
+    _initStockHeightmap(minX, maxX, minY, maxY, topZ, minZ) {
+      const res = 48;
+      this._hm = {
+        res,
+        minX, maxX, minY, maxY, topZ, minZ,
+        heights: new Float32Array(res * res)
+      };
+      this._hm.heights.fill(topZ);
+
+      const sx = maxX - minX;
+      const sy = maxY - minY;
+      const geo = new THREE.PlaneGeometry(sx, sy, res - 1, res - 1);
+      // Plane is XY in three; rotate to XZ plane mapping: local X->X, local Y->-Y (CNC)
+      geo.rotateX(-Math.PI / 2);
+      const mat = new THREE.MeshStandardMaterial({
+        color: 0x94a3b8,
+        transparent: true,
+        opacity: 0.45,
+        metalness: 0.05,
+        roughness: 0.9,
+        side: THREE.DoubleSide,
+        flatShading: true
+      });
+      this.stockSurface = new THREE.Mesh(geo, mat);
+      this.stockSurface.position.set((minX + maxX) / 2, 0, -(minY + maxY) / 2);
+      this.stockSurface.visible = this.showStock;
+      this.scene.add(this.stockSurface);
+      this._hmBasePositions = Float32Array.from(geo.attributes.position.array);
+      this._updateStockSurfaceMesh();
+    }
+
+    resetMaterialRemoval() {
+      if (!this._hm) return;
+      this._hm.heights.fill(this._hm.topZ);
+      this._updateStockSurfaceMesh();
+    }
+
+    /** Carve stock along a tool move (approximate) */
+    carveSegment(from, to, toolRadius) {
+      if (!this._hm || !from || !to) return;
+      const r = Math.max(toolRadius || 1, 0.5);
+      const hm = this._hm;
+      const steps = Math.max(2, Math.ceil(
+        Math.sqrt(
+          Math.pow(to.x - from.x, 2) + Math.pow(to.y - from.y, 2) + Math.pow(to.z - from.z, 2)
+        ) / Math.max(r * 0.4, 0.5)
+      ));
+      for (let i = 0; i <= steps; i++) {
+        const t = i / steps;
+        const x = from.x + (to.x - from.x) * t;
+        const y = from.y + (to.y - from.y) * t;
+        const z = from.z + (to.z - from.z) * t;
+        this._carveCircle(x, y, z, r);
+      }
+    }
+
+    _carveCircle(x, y, zTool, radius) {
+      const hm = this._hm;
+      if (!hm) return;
+      const res = hm.res;
+      const sx = (hm.maxX - hm.minX) / (res - 1);
+      const sy = (hm.maxY - hm.minY) / (res - 1);
+      const i0 = Math.floor((x - radius - hm.minX) / sx);
+      const i1 = Math.ceil((x + radius - hm.minX) / sx);
+      const j0 = Math.floor((y - radius - hm.minY) / sy);
+      const j1 = Math.ceil((y + radius - hm.minY) / sy);
+      for (let j = Math.max(0, j0); j <= Math.min(res - 1, j1); j++) {
+        for (let i = Math.max(0, i0); i <= Math.min(res - 1, i1); i++) {
+          const cx = hm.minX + i * sx;
+          const cy = hm.minY + j * sy;
+          const d = Math.sqrt((cx - x) * (cx - x) + (cy - y) * (cy - y));
+          if (d <= radius) {
+            const idx = j * res + i;
+            if (zTool < hm.heights[idx]) hm.heights[idx] = Math.max(zTool, hm.minZ);
+          }
+        }
+      }
+    }
+
+    _updateStockSurfaceMesh() {
+      if (!this.stockSurface || !this._hm || !this._hmBasePositions) return;
+      const pos = this.stockSurface.geometry.attributes.position;
+      const base = this._hmBasePositions;
+      const hm = this._hm;
+      const res = hm.res;
+      // PlaneGeometry vertices order: grid
+      for (let j = 0; j < res; j++) {
+        for (let i = 0; i < res; i++) {
+          const vi = (j * res + i) * 3;
+          const h = hm.heights[j * res + i];
+          // After rotateX(-90): y is height
+          pos.array[vi] = base[vi];
+          pos.array[vi + 1] = h;
+          pos.array[vi + 2] = base[vi + 2];
+        }
+      }
+      pos.needsUpdate = true;
+      this.stockSurface.geometry.computeVertexNormals();
+    }
+
+    flushMaterialRemoval() {
+      this._updateStockSurfaceMesh();
+    }
+
+    /** Rapid through stock? returns collision info or null */
+    checkCollision(from, to, type) {
+      if (!this._stockBounds || type !== 'rapid') return null;
+      const b = this._stockBounds;
+      // Sample midpoints
+      for (let i = 0; i <= 4; i++) {
+        const t = i / 4;
+        const x = from.x + (to.x - from.x) * t;
+        const y = from.y + (to.y - from.y) * t;
+        const z = from.z + (to.z - from.z) * t;
+        if (x >= b.minX && x <= b.maxX && y >= b.minY && y <= b.maxY && z < b.topZ - 0.2 && z > b.minZ) {
+          // If heightmap exists, compare to local surface
+          let surfaceZ = b.topZ;
+          if (this._hm) {
+            const hm = this._hm;
+            const ix = Math.round((x - hm.minX) / (hm.maxX - hm.minX) * (hm.res - 1));
+            const iy = Math.round((y - hm.minY) / (hm.maxY - hm.minY) * (hm.res - 1));
+            if (ix >= 0 && iy >= 0 && ix < hm.res && iy < hm.res) {
+              surfaceZ = hm.heights[iy * hm.res + ix];
+            }
+          }
+          if (z < surfaceZ - 0.15) {
+            return { x, y, z, surfaceZ };
+          }
+        }
+      }
+      return null;
     }
 
     setRapidsVisible(v) {
@@ -1902,10 +2288,65 @@ M30`
     },
 
     _bindEvents() {
+      const on = (id, ev, fn) => {
+        const el = document.getElementById(id);
+        if (el) el.addEventListener(ev, fn);
+      };
+      const qon = (sel, ev, fn) => {
+        const el = document.querySelector(sel);
+        if (el) el.addEventListener(ev, fn);
+      };
+
       // Theme
-      document.getElementById('btn-theme').addEventListener('click', () => {
+      on('btn-theme', 'click', () => {
         const isDark = document.body.classList.contains('theme-dark');
         this._applyTheme(isDark ? 'light' : 'dark');
+      });
+
+      // Templates
+      on('btn-templates', 'click', () => {
+        const m = document.getElementById('templates-modal');
+        if (m) m.classList.remove('hidden');
+      });
+      on('templates-close', 'click', () => {
+        const m = document.getElementById('templates-modal');
+        if (m) m.classList.add('hidden');
+      });
+      qon('#templates-modal .modal-backdrop', 'click', () => {
+        const m = document.getElementById('templates-modal');
+        if (m) m.classList.add('hidden');
+      });
+      document.querySelectorAll('[data-tpl]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          document.querySelectorAll('[data-tpl]').forEach(b => b.classList.remove('active'));
+          btn.classList.add('active');
+          ['face', 'pocket', 'lathe'].forEach(id => {
+            const f = document.getElementById('tpl-' + id);
+            if (f) f.classList.toggle('hidden', btn.dataset.tpl !== id);
+          });
+        });
+      });
+      on('btn-gen-template', 'click', () => {
+        this._generateTemplate();
+        const m = document.getElementById('templates-modal');
+        if (m) m.classList.add('hidden');
+      });
+      on('diameter-mode', 'change', () => {
+        if (this.parser) {
+          const p = this.parser.state;
+          this._updateCoordDisplay(p.x, p.y, p.z);
+        }
+      });
+
+      // WCS offsets → rebuild toolpath
+      const wcsRebuild = () => {
+        if (!this.parseResult) return;
+        clearTimeout(this._wcsTimer);
+        this._wcsTimer = setTimeout(() => this._reparse(), 300);
+      };
+      document.querySelectorAll('#wcs-tbody input').forEach(inp => {
+        inp.addEventListener('change', wcsRebuild);
+        inp.addEventListener('input', wcsRebuild);
       });
 
       // Machine tabs
@@ -1915,6 +2356,18 @@ M30`
           btn.classList.add('active');
           this.machine = btn.dataset.machine;
           this.viewport.setMachine(this.machine);
+          if (this.machine === 'lathe') {
+            document.getElementById('diameter-mode').checked = true;
+            // Prefer Trace XZ for lathe
+            this._setViewMode('trace');
+            if (this.trace) this.trace.setPlane('xz');
+            document.querySelectorAll('[data-view]').forEach(b => b.classList.remove('active'));
+            const tr = document.querySelector('[data-view="trace"]');
+            if (tr) tr.classList.add('active');
+            document.querySelectorAll('[data-trace-plane]').forEach(b => {
+              b.classList.toggle('active', b.dataset.tracePlane === 'xz');
+            });
+          }
           // Show A/C for 5-axis
           const showRot = this.machine === '5axis';
           document.querySelector('.coord.a-axis').classList.toggle('hidden', !showRot);
@@ -2002,20 +2455,35 @@ M30`
       });
 
       // Simulation controls
-      document.getElementById('btn-play').addEventListener('click', () => {
+      on('btn-play', 'click', () => {
         if (this.simulator.playing) this.simulator.pause();
-        else this.simulator.play();
+        else {
+          if (this.simulator.index === 0 && this.trace) this.trace.setProgress(0);
+          this.simulator.play();
+        }
       });
-      document.getElementById('btn-reset').addEventListener('click', () => this.simulator.reset());
-      document.getElementById('btn-step-fwd').addEventListener('click', () => this.simulator.stepForward());
-      document.getElementById('btn-step-back').addEventListener('click', () => this.simulator.stepBack());
+      on('btn-stop', 'click', () => {
+        this.simulator.stop();
+        if (this.trace) this.trace.setProgress(1);
+      });
+      on('btn-reset', 'click', () => {
+        this.simulator.reset();
+        if (this.trace) this.trace.setProgress(0);
+        if (this.viewport) this.viewport.resetMaterialRemoval();
+        this._collisionHits = [];
+      });
+      on('btn-step-fwd', 'click', () => this.simulator.stepForward());
+      on('btn-step-back', 'click', () => this.simulator.stepBack());
 
       const speedSlider = document.getElementById('speed-slider');
-      speedSlider.addEventListener('input', () => {
-        const v = parseFloat(speedSlider.value);
-        this.simulator.setSpeed(v);
-        document.getElementById('speed-value').textContent = v.toFixed(1) + '×';
-      });
+      if (speedSlider) {
+        speedSlider.addEventListener('input', () => {
+          const v = parseFloat(speedSlider.value);
+          this.simulator.setSpeed(v);
+          const sv = document.getElementById('speed-value');
+          if (sv) sv.textContent = v.toFixed(1) + '×';
+        });
+      }
 
       // View options
       document.getElementById('show-grid').addEventListener('change', (e) => {
@@ -2145,6 +2613,244 @@ M30`
       this._pushHistory();
       this._autosave(false);
       this._reparse();
+      if (name === 'lathe' || name === 'latheface') {
+        this.machine = 'lathe';
+        document.querySelectorAll('.machine-tabs .tab').forEach(b => {
+          b.classList.toggle('active', b.dataset.machine === 'lathe');
+        });
+        document.getElementById('diameter-mode').checked = true;
+        this._setViewMode('trace');
+        if (this.trace) this.trace.setPlane('xz');
+        document.querySelectorAll('[data-view]').forEach(b => b.classList.remove('active'));
+        const tr = document.querySelector('[data-view="trace"]');
+        if (tr) tr.classList.add('active');
+      }
+    },
+
+    _generateTemplate() {
+      const active = document.querySelector('[data-tpl].active');
+      const kind = active ? active.dataset.tpl : 'face';
+      let code = '';
+      if (kind === 'face') {
+        const X = +document.getElementById('tpl-face-x').value || 100;
+        const Y = +document.getElementById('tpl-face-y').value || 60;
+        const Z = +document.getElementById('tpl-face-z').value || -0.5;
+        const step = Math.max(0.5, +document.getElementById('tpl-face-step').value || 8);
+        const F = +document.getElementById('tpl-face-f').value || 800;
+        const S = +document.getElementById('tpl-face-s').value || 6000;
+        const T = +document.getElementById('tpl-face-t').value || 1;
+        const lines = [
+          '; Careado generado — ' + X + 'x' + Y + ' Z' + Z,
+          'G21 G90 G17',
+          'G54',
+          'T' + T + ' M6',
+          'S' + S + ' M3',
+          'G0 X0 Y0 Z30',
+          'G0 Z2',
+          'G1 Z' + Z + ' F200'
+        ];
+        let y = 0, dir = 1;
+        while (y <= Y + 1e-6) {
+          if (dir > 0) {
+            lines.push('G1 X' + X + ' Y' + y.toFixed(3) + ' F' + F);
+            y += step;
+            if (y <= Y) lines.push('G1 X' + X + ' Y' + Math.min(y, Y).toFixed(3));
+          } else {
+            lines.push('G1 X0 Y' + y.toFixed(3) + ' F' + F);
+            y += step;
+            if (y <= Y) lines.push('G1 X0 Y' + Math.min(y, Y).toFixed(3));
+          }
+          dir *= -1;
+        }
+        lines.push('G0 Z30', 'M5', 'M30');
+        code = lines.join('\n');
+      } else if (kind === 'pocket') {
+        const X = +document.getElementById('tpl-pok-x').value || 40;
+        const Y = +document.getElementById('tpl-pok-y').value || 25;
+        const Zf = +document.getElementById('tpl-pok-z').value || -5;
+        const stepZ = Math.max(0.5, +document.getElementById('tpl-pok-stepz').value || 2.5);
+        const F = +document.getElementById('tpl-pok-f').value || 400;
+        const S = +document.getElementById('tpl-pok-s').value || 8000;
+        const lines = [
+          '; Cavidad generada ' + X + 'x' + Y + 'x' + Zf,
+          'G21 G90 G17',
+          'G54',
+          'T1 M6',
+          'S' + S + ' M3',
+          'G0 X0 Y0 Z30'
+        ];
+        for (let z = -stepZ; z >= Zf - 1e-6; z -= stepZ) {
+          const zz = Math.max(z, Zf);
+          lines.push('G0 X0 Y0 Z2');
+          lines.push('G1 Z' + zz.toFixed(3) + ' F200');
+          lines.push('G1 X' + X + ' F' + F);
+          lines.push('G1 Y' + Y);
+          lines.push('G1 X0');
+          lines.push('G1 Y0');
+        }
+        lines.push('G0 Z30', 'M5', 'M30');
+        code = lines.join('\n');
+      } else {
+        // lathe OD roughing
+        const od = +document.getElementById('tpl-lat-od').value || 40;
+        const id = +document.getElementById('tpl-lat-id').value || 28;
+        const Z = +document.getElementById('tpl-lat-z').value || -30;
+        const U = Math.max(0.2, +document.getElementById('tpl-lat-u').value || 1.5);
+        const F = +document.getElementById('tpl-lat-f').value || 0.2;
+        const S = +document.getElementById('tpl-lat-s').value || 1200;
+        const lines = [
+          '; Desbaste torno Ø' + od + ' → Ø' + id + ' Z' + Z,
+          '; X en diámetro',
+          'G21 G90 G18',
+          'G54',
+          'T1 M6',
+          'S' + S + ' M3',
+          'G0 X' + (od + 2) + ' Z5'
+        ];
+        for (let x = od; x >= id - 1e-6; x -= U * 2) {
+          // U is radius DOC; diameter step = 2*U
+          const xx = Math.max(x, id);
+          lines.push('G0 X' + xx.toFixed(3) + ' Z2');
+          lines.push('G1 Z' + Z + ' F' + F);
+          lines.push('G0 X' + (od + 2));
+          lines.push('G0 Z5');
+        }
+        lines.push('G0 X' + id + ' Z2');
+        lines.push('G1 Z' + Z + ' F' + (F * 0.7));
+        lines.push('G0 X' + (od + 2), 'G0 Z5', 'M5', 'M30');
+        code = lines.join('\n');
+        this.machine = 'lathe';
+        document.querySelectorAll('.machine-tabs .tab').forEach(b => {
+          b.classList.toggle('active', b.dataset.machine === 'lathe');
+        });
+        document.getElementById('diameter-mode').checked = true;
+      }
+      this.editor.setValue(code);
+      this._pushHistory();
+      this._autosave(false);
+      this._reparse();
+      if (kind === 'lathe') {
+        this._setViewMode('trace');
+        if (this.trace) this.trace.setPlane('xz');
+      }
+    },
+
+    _validateGCode(text, segments, tools) {
+      const alarms = [];
+      const lines = text.split(/\r?\n/);
+      const knownG = {
+        0:1,1:1,2:1,3:1,17:1,18:1,19:1,20:1,21:1,28:1,40:1,41:1,42:1,
+        54:1,55:1,56:1,57:1,58:1,59:1,80:1,81:1,82:1,83:1,84:1,85:1,86:1,89:1,
+        90:1,91:1,98:1,99:1,71:1,72:1
+      };
+      let lastMotion = 'G0';
+      let sawTool = false;
+      let toolNum = 0;
+      let hasFeed = false;
+
+      lines.forEach((raw, i) => {
+        const ln = i + 1;
+        const cleaned = raw.replace(/;.*$/, '').replace(/\(.*?\)/g, '').trim();
+        if (!cleaned) return;
+        const words = {};
+        const re = /([A-Za-z])\s*(-?\d*\.?\d+)/g;
+        let m;
+        while ((m = re.exec(cleaned)) !== null) {
+          words[m[1].toUpperCase()] = parseFloat(m[2]);
+        }
+        if (words.G !== undefined) {
+          const g = words.G;
+          if (!knownG[g] && g !== 4) {
+            alarms.push({ level: 'warn', line: ln, msg: 'G' + g + ' no soportado / desconocido' });
+          }
+          if (g === 0) lastMotion = 'G0';
+          if (g === 1 || g === 2 || g === 3) lastMotion = 'G1';
+        }
+        if (words.T !== undefined) { sawTool = true; toolNum = words.T; }
+        if (words.M === 6) sawTool = true;
+        if (words.F !== undefined) hasFeed = true;
+
+        // Cut without feed
+        if ((words.G === 1 || lastMotion === 'G1') && (words.X !== undefined || words.Y !== undefined || words.Z !== undefined)) {
+          if (!hasFeed && words.F === undefined) {
+            // only once per program style
+          }
+        }
+      });
+
+      if (!sawTool) {
+        alarms.push({ level: 'warn', line: 0, msg: 'No se definió herramienta (T / M6)' });
+      } else if (toolNum && tools && !tools[toolNum]) {
+        alarms.push({ level: 'warn', line: 0, msg: 'T' + toolNum + ' no está en la tabla de herramientas' });
+      }
+
+      // Plunge without rapid approach
+      let prevWasRapid = true;
+      let prevZ = 0;
+      (segments || []).forEach(s => {
+        if (s.type === 'rapid') {
+          prevWasRapid = true;
+        } else if (s.type === 'cut') {
+          const dz = s.to.z - s.from.z;
+          if (dz < -0.2 && !prevWasRapid && s.from.z > s.to.z) {
+            // only flag steep plunge from air without recent rapid
+            if (s.from.z > 1 && Math.abs(s.to.x - s.from.x) < 0.01 && Math.abs(s.to.y - s.from.y) < 0.01) {
+              alarms.push({
+                level: 'error',
+                line: s.lineNum,
+                msg: 'Penetración Z en G1 sin aproximación G0 (L' + s.lineNum + ')'
+              });
+            }
+          }
+          prevWasRapid = false;
+        }
+        prevZ = s.to.z;
+      });
+
+      // Missing F on any cut
+      const cutsNoF = (segments || []).filter(s => s.type === 'cut' && !(s.feed > 0));
+      if (cutsNoF.length) {
+        alarms.push({
+          level: 'warn',
+          line: cutsNoF[0].lineNum,
+          msg: 'Movimientos de corte sin F (feed) definido'
+        });
+      }
+
+      // Empty
+      if (!(segments || []).length && text.trim()) {
+        alarms.push({ level: 'info', line: 0, msg: 'No se generaron movimientos — revisa el G-code' });
+      }
+
+      return alarms;
+    },
+
+    _renderAlarms(alarms) {
+      const box = document.getElementById('alarms-list');
+      const badge = document.getElementById('alarm-count');
+      if (!box) return;
+      badge.textContent = String(alarms.length);
+      badge.classList.toggle('zero', alarms.length === 0);
+      if (!alarms.length) {
+        box.innerHTML = '<div class="alarm-empty">Sin alarmas</div>';
+        return;
+      }
+      box.innerHTML = alarms.map(a => {
+        const cls = a.level === 'error' ? '' : (a.level === 'warn' ? 'warn' : 'info');
+        const tag = a.line ? 'L' + a.line + ' · ' : '';
+        return '<div class="alarm-item ' + cls + '">' + tag + a.msg + '</div>';
+      }).join('');
+    },
+
+    _updateCoordDisplay(x, y, z) {
+      const dia = document.getElementById('diameter-mode') && document.getElementById('diameter-mode').checked;
+      if (dia) {
+        document.getElementById('pos-x').textContent = (x * 2).toFixed(3) + 'Ø';
+      } else {
+        document.getElementById('pos-x').textContent = x.toFixed(3);
+      }
+      document.getElementById('pos-y').textContent = y.toFixed(3);
+      document.getElementById('pos-z').textContent = z.toFixed(3);
     },
 
     _download(filename, content, mime) {
@@ -2281,15 +2987,40 @@ M30`
           }
         }
 
-        this.viewport.buildToolpath(segments, this._getPathOptions());
+        const visSegs = this._applyWcsToSegments(segments);
+        this.viewport.buildToolpath(visSegs, this._getPathOptions());
         this.viewport.updateStock(bbox);
-        this.simulator.load(segments);
+        this.viewport.resetMaterialRemoval();
+        this.simulator.load(visSegs);
         this._updateActiveToolGeom();
+        this._collisionHits = [];
         if (this.trace) {
-          this.trace.setSegments(segments);
+          this.trace.setSegments(visSegs);
           this.trace.setProgress(1);
           if (this._viewMode === 'trace') this.trace.resize();
         }
+
+        const tools = this._getTools();
+        const alarms = this._validateGCode(text, segments, tools);
+        // Pre-scan collisions on rapids
+        visSegs.forEach(s => {
+          if (s.type === 'rapid') {
+            const hit = this.viewport.checkCollision(s.from, s.to, 'rapid');
+            if (hit) {
+              alarms.push({
+                level: 'error',
+                line: s.lineNum,
+                msg: 'Colisión rapid/stock L' + s.lineNum +
+                  ' @ X' + hit.x.toFixed(1) + ' Y' + hit.y.toFixed(1) + ' Z' + hit.z.toFixed(1)
+              });
+            }
+          }
+        });
+        this._renderAlarms(alarms);
+        const st = document.getElementById('parse-status');
+        if (alarms.some(a => a.level === 'error')) st.textContent = 'Alarmas';
+        else if (alarms.length) st.textContent = 'Avisos';
+        else st.textContent = 'OK';
 
         // Stats
         document.getElementById('stat-moves').textContent = stats.moves;
@@ -2331,6 +3062,46 @@ M30`
         tools[t] = { diameter: dia, length: len };
       });
       return tools;
+    },
+
+    _getWcsOffsets() {
+      const map = {};
+      document.querySelectorAll('#wcs-tbody tr').forEach(tr => {
+        const name = tr.getAttribute('data-wcs');
+        map[name] = {
+          x: parseFloat(tr.querySelector('.wcs-x').value) || 0,
+          y: parseFloat(tr.querySelector('.wcs-y').value) || 0,
+          z: parseFloat(tr.querySelector('.wcs-z').value) || 0
+        };
+      });
+      return map;
+    },
+
+    _getActiveWcsName() {
+      const r = document.querySelector('input[name="wcs-active"]:checked');
+      return r ? r.value : 'G54';
+    },
+
+    _applyWcsToSegments(segments) {
+      const offsets = this._getWcsOffsets();
+      // Use per-segment wcs if present, else active radio
+      const active = this._getActiveWcsName();
+      return (segments || []).map(s => {
+        const w = s.wcs && offsets[s.wcs] ? s.wcs : active;
+        const o = offsets[w] || { x: 0, y: 0, z: 0 };
+        if (!o.x && !o.y && !o.z) return s;
+        const copy = Object.assign({}, s);
+        copy.from = { x: s.from.x + o.x, y: s.from.y + o.y, z: s.from.z + o.z, a: s.from.a, c: s.from.c };
+        copy.to = { x: s.to.x + o.x, y: s.to.y + o.y, z: s.to.z + o.z, a: s.to.a, c: s.to.c };
+        if (s.arc) {
+          copy.arc = Object.assign({}, s.arc, {
+            cx: (s.arc.cx || 0) + o.x,
+            cy: (s.arc.cy || 0) + o.y,
+            cz: (s.arc.cz || 0) + o.z
+          });
+        }
+        return copy;
+      });
     },
 
     _getPathOptions() {
@@ -2429,21 +3200,54 @@ M30`
 
       if (data.position) {
         const p = data.position;
-        document.getElementById('pos-x').textContent = p.x.toFixed(3);
-        document.getElementById('pos-y').textContent = p.y.toFixed(3);
-        document.getElementById('pos-z').textContent = p.z.toFixed(3);
+        this._updateCoordDisplay(p.x, p.y, p.z);
         document.getElementById('pos-a').textContent = (p.a || 0).toFixed(3);
         document.getElementById('pos-c').textContent = (p.c || 0).toFixed(3);
         if (this.trace) this.trace.setTool(p.x, p.y, p.z);
       }
+
+      // Material removal + live collision on current segment
+      if (data.segment && data.index > 0) {
+        const s = data.segment;
+        if (s.type === 'cut' || (s.type && s.type.startsWith('arc'))) {
+          const tools = this._getTools();
+          const t = tools[s.tool] || tools[1] || { diameter: 6 };
+          this.viewport.carveSegment(s.from, s.to, (t.diameter || 6) / 2);
+          if (data.index % 3 === 0) this.viewport.flushMaterialRemoval();
+        } else if (s.type === 'rapid') {
+          const hit = this.viewport.checkCollision(s.from, s.to, 'rapid');
+          if (hit && !(this._collisionHits || []).includes(s.lineNum)) {
+            this._collisionHits = this._collisionHits || [];
+            this._collisionHits.push(s.lineNum);
+            const alarms = [{
+              level: 'error',
+              line: s.lineNum,
+              msg: 'COLISIÓN rapid/stock L' + s.lineNum +
+                ' Z' + hit.z.toFixed(2) + ' < stock Z' + hit.surfaceZ.toFixed(2)
+            }];
+            // append to list
+            const box = document.getElementById('alarms-list');
+            if (box && !box.innerHTML.includes('L' + s.lineNum)) {
+              box.insertAdjacentHTML('afterbegin',
+                '<div class="alarm-item">L' + s.lineNum + ' · COLISIÓN rapid/stock</div>');
+              const badge = document.getElementById('alarm-count');
+              if (badge) badge.textContent = String((parseInt(badge.textContent, 10) || 0) + 1);
+            }
+          }
+        }
+      }
+      if (data.finished) this.viewport.flushMaterialRemoval();
 
       if (data.total !== undefined) {
         const pct = data.total ? (data.index / data.total * 100) : 0;
         document.getElementById('progress-fill').style.width = pct + '%';
         document.getElementById('progress-line').textContent = `Línea ${data.index} / ${data.total}`;
         document.getElementById('progress-pct').textContent = pct.toFixed(0) + '%';
-        if (this.trace && data.total) this.trace.setProgress(data.index / data.total);
+        if (this.trace && data.total) {
+          this.trace.setProgress(data.total ? data.index / data.total : 0);
+        }
       }
+      if (data.finished && this.trace) this.trace.setProgress(1);
 
       if (data.segment) {
         const s = data.segment;
@@ -2458,6 +3262,11 @@ M30`
         document.getElementById('info-tool').textContent = 'T' + (s.tool || 0);
         document.getElementById('info-coolant').textContent = s.coolant ? 'ON' : 'OFF';
         document.getElementById('info-wcs').textContent = s.wcs || 'G54';
+        // Sync radio to program WCS
+        if (s.wcs) {
+          const radio = document.querySelector('input[name="wcs-active"][value="' + s.wcs + '"]');
+          if (radio && !radio.checked) radio.checked = true;
+        }
         const planeCode = s.plane === 'XZ' ? 'G18' : (s.plane === 'YZ' ? 'G19' : 'G17');
         document.getElementById('info-plane').textContent = planeCode + ' ' + (s.plane || 'XY');
         this._updateActiveToolGeom(s.tool);
