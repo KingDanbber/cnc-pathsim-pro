@@ -102,22 +102,26 @@ input, textarea { font-family: inherit; }
   gap: 8px;
   z-index: 50;
   flex-shrink: 0;
-  overflow: hidden;
+  overflow: visible;
 }
 .header-left {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 6px;
   min-width: 0;
-  flex: 1;
-  overflow: hidden;
+  flex: 1 1 auto;
+  overflow: visible;
 }
 .header-right {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 0;
   flex-shrink: 0;
+  max-width: 48%;
+  overflow-x: auto;
+  scrollbar-width: none;
 }
+.header-right::-webkit-scrollbar { display: none; }
 .logo {
   display: flex;
   align-items: center;
@@ -140,9 +144,15 @@ input, textarea { font-family: inherit; }
   gap: 1px;
   flex-shrink: 1;
   min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
 }
+.machine-tabs::-webkit-scrollbar { display: none; height: 0; }
 .machine-tabs .tab {
-  padding: 5px 12px;
+  padding: 5px 10px;
   font-size: 12px;
   font-weight: 600;
   border-radius: 4px;
@@ -150,6 +160,7 @@ input, textarea { font-family: inherit; }
   transition: all var(--transition);
   letter-spacing: 0.02em;
   white-space: nowrap;
+  flex-shrink: 0;
 }
 .machine-tabs .tab:hover { color: var(--text); background: var(--bg-hover); }
 .machine-tabs .tab.active {
@@ -673,8 +684,12 @@ body.theme-light .coord-display {
   .logo { gap: 4px; }
   .logo svg { width: 22px; height: 22px; }
   .logo .logo-text { font-size: 12px; }
+  .machine-tabs {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
   .machine-tabs .tab {
-    padding: 4px 8px;
+    padding: 4px 7px;
     font-size: 11px;
   }
   .btn-ghost, .btn-icon {
@@ -717,9 +732,11 @@ body.theme-light .coord-display {
   .logo .logo-text { display: none; }
 
   .machine-tabs .tab {
-    padding: 4px 7px;
+    padding: 4px 6px;
     font-size: 10px;
   }
+  /* Keep all machine modes reachable */
+  .header-right .btn-text { display: none; }
   .header-right {
     gap: 0;
   }

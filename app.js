@@ -1255,7 +1255,8 @@ M30`
       const n = this.segments.length;
       const maxI = Math.floor(n * this.progress);
       const passColors = ['#f0abfc', '#a78bfa', '#818cf8', '#38bdf8', '#2dd4bf', '#4ade80', '#facc15', '#fb923c'];
-      let lastPassLabel = null;
+      const passLegend = []; // { label, color, mid }
+      const seenPass = {};
       for (let i = 0; i < maxI; i++) {
         const s = this.segments[i];
         const a = this._proj(s.from), b = this._proj(s.to);
@@ -1270,6 +1271,15 @@ M30`
           ctx.strokeStyle = passColors[pi % passColors.length];
           ctx.lineWidth = 1.8;
           ctx.setLineDash([]);
+          if (s.passLabel && !seenPass[s.passLabel]) {
+            seenPass[s.passLabel] = true;
+            passLegend.push({
+              label: s.passLabel,
+              color: passColors[pi % passColors.length],
+              x: (p0.x + p1.x) / 2,
+              y: (p0.y + p1.y) / 2
+            });
+          }
         } else if (s.type && s.type.startsWith('arc')) {
           ctx.strokeStyle = '#e879f9';
           ctx.lineWidth = 1.6;
@@ -1283,16 +1293,27 @@ M30`
         ctx.moveTo(p0.x, p0.y);
         ctx.lineTo(p1.x, p1.y);
         ctx.stroke();
-
-        // Number G76 passes at start of each cut pass
-        if (s.lathe === 'G76' && s.thread && s.passLabel && s.passLabel !== lastPassLabel) {
-          lastPassLabel = s.passLabel;
-          ctx.fillStyle = '#e2e8f0';
-          ctx.font = '600 10px ui-monospace, monospace';
-          ctx.fillText(s.passLabel, p0.x + 4, p0.y - 4);
-        }
       }
       ctx.setLineDash([]);
+
+      // G76 pass legend (right side) — avoids stacked labels on path
+      if (passLegend.length) {
+        const boxW = 52;
+        const rowH = 14;
+        const boxH = passLegend.length * rowH + 10;
+        const bx = w - boxW - 8;
+        const by = 36;
+        ctx.fillStyle = 'rgba(10, 12, 16, 0.85)';
+        ctx.fillRect(bx, by, boxW, boxH);
+        ctx.font = '600 10px ui-monospace, monospace';
+        passLegend.forEach((p, idx) => {
+          const yy = by + 12 + idx * rowH;
+          ctx.fillStyle = p.color;
+          ctx.fillRect(bx + 6, yy - 7, 8, 8);
+          ctx.fillStyle = '#e2e8f0';
+          ctx.fillText(p.label, bx + 18, yy);
+        });
+      }
 
       const tp = this._worldToScreen(this.tool.u, this.tool.v);
       ctx.strokeStyle = '#22d3ee';
