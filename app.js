@@ -974,31 +974,53 @@ M30`
       for (let i = 1; i <= passes; i++) {
         const t = i / passes;
         const xPass = startX + (targetX - startX) * t;
+        const passLabel = 'P' + i + '/' + passes;
         const toStart = { x: xPass, y: cur.y, z: zStart, a: cur.a, c: cur.c };
-        segs.push(this._makeSeg(lineNum, raw, 'rapid', cur, toStart, { lathe: 'G76' }));
-        cur = toStart;
-        const toEnd = { x: xPass, y: cur.y, z: zEnd, a: cur.a, c: cur.c };
-        segs.push(this._makeSeg(lineNum, raw, 'cut', cur, toEnd, {
-          lathe: 'G76', feed: pitch, words
+        segs.push(this._makeSeg(lineNum, raw, 'rapid', cur, toStart, {
+          lathe: 'G76', pass: i, passes: passes, passLabel: passLabel
         }));
-        cur = toEnd;
+        cur = toStart;
+        const zSteps = Math.max(4, Math.ceil(Math.abs(zEnd - zStart) / Math.max(pitch * 0.5, 0.25)));
+        for (let k = 1; k <= zSteps; k++) {
+          const tk = k / zSteps;
+          const zk = zStart + (zEnd - zStart) * tk;
+          const next = { x: xPass, y: cur.y, z: zk, a: cur.a, c: cur.c };
+          segs.push(this._makeSeg(lineNum, raw, 'cut', cur, next, {
+            lathe: 'G76', feed: pitch, words: words, pass: i, passes: passes, passLabel: passLabel, thread: true
+          }));
+          cur = next;
+        }
         const toRet = { x: clearX, y: cur.y, z: zEnd, a: cur.a, c: cur.c };
-        segs.push(this._makeSeg(lineNum, raw, 'rapid', cur, toRet, { lathe: 'G76' }));
+        segs.push(this._makeSeg(lineNum, raw, 'rapid', cur, toRet, {
+          lathe: 'G76', pass: i, passes: passes, passLabel: passLabel
+        }));
         cur = toRet;
         const toZ0 = { x: clearX, y: cur.y, z: zStart, a: cur.a, c: cur.c };
-        segs.push(this._makeSeg(lineNum, raw, 'rapid', cur, toZ0, { lathe: 'G76' }));
+        segs.push(this._makeSeg(lineNum, raw, 'rapid', cur, toZ0, {
+          lathe: 'G76', pass: i, passes: passes, passLabel: passLabel
+        }));
         cur = toZ0;
       }
 
       if (Math.abs(targetX - endX) > 1e-4) {
+        const passLabel = 'FINISH';
         const toStart = { x: endX, y: cur.y, z: zStart, a: cur.a, c: cur.c };
-        segs.push(this._makeSeg(lineNum, raw, 'rapid', cur, toStart, { lathe: 'G76' }));
+        segs.push(this._makeSeg(lineNum, raw, 'rapid', cur, toStart, {
+          lathe: 'G76', pass: passes + 1, passes: passes + 1, passLabel: passLabel
+        }));
         cur = toStart;
-        const toEnd = { x: endX, y: cur.y, z: zEnd, a: cur.a, c: cur.c };
-        segs.push(this._makeSeg(lineNum, raw, 'cut', cur, toEnd, { lathe: 'G76', feed: pitch, words }));
-        cur = toEnd;
+        const zSteps = Math.max(4, Math.ceil(Math.abs(zEnd - zStart) / Math.max(pitch * 0.5, 0.25)));
+        for (let k = 1; k <= zSteps; k++) {
+          const tk = k / zSteps;
+          const zk = zStart + (zEnd - zStart) * tk;
+          const next = { x: endX, y: cur.y, z: zk, a: cur.a, c: cur.c };
+          segs.push(this._makeSeg(lineNum, raw, 'cut', cur, next, {
+            lathe: 'G76', feed: pitch, words: words, pass: passes + 1, passLabel: passLabel, thread: true
+          }));
+          cur = next;
+        }
         const toRet = { x: clearX, y: cur.y, z: zEnd, a: cur.a, c: cur.c };
-        segs.push(this._makeSeg(lineNum, raw, 'rapid', cur, toRet, { lathe: 'G76' }));
+        segs.push(this._makeSeg(lineNum, raw, 'rapid', cur, toRet, { lathe: 'G76', passLabel: passLabel }));
         cur = toRet;
       }
 
@@ -1086,6 +1108,8 @@ M30`
       this._dragging = false;
       this._lastX = 0;
       this._lastY = 0;
+      this.diameterMode = false;
+      this.sectionMode = false; // XZ material section fill
       this._bindInput();
     }
 
@@ -1144,6 +1168,11 @@ M30`
 
     setDiameterMode(on) {
       this.diameterMode = !!on;
+      this.draw();
+    }
+
+    setSectionMode(on) {
+      this.sectionMode = !!on;
       this.draw();
     }
 
@@ -1221,18 +1250,26 @@ M30`
       ctx.fillRect(0, 0, w, h);
       this._drawGrid(ctx, w, h);
       this._drawAxes(ctx, w, h);
+      if (this.sectionMode && this.plane === 'xz') this._drawSection(ctx);
 
       const n = this.segments.length;
       const maxI = Math.floor(n * this.progress);
+      const passColors = ['#f0abfc', '#a78bfa', '#818cf8', '#38bdf8', '#2dd4bf', '#4ade80', '#facc15', '#fb923c'];
+      let lastPassLabel = null;
       for (let i = 0; i < maxI; i++) {
         const s = this.segments[i];
         const a = this._proj(s.from), b = this._proj(s.to);
         const p0 = this._worldToScreen(a.u, a.v);
         const p1 = this._worldToScreen(b.u, b.v);
         if (s.type === 'rapid') {
-          ctx.strokeStyle = 'rgba(239, 68, 68, 0.55)';
+          ctx.strokeStyle = 'rgba(239, 68, 68, 0.45)';
           ctx.lineWidth = 1;
           ctx.setLineDash([4, 3]);
+        } else if (s.lathe === 'G76' && s.thread) {
+          const pi = (s.pass || 1) - 1;
+          ctx.strokeStyle = passColors[pi % passColors.length];
+          ctx.lineWidth = 1.8;
+          ctx.setLineDash([]);
         } else if (s.type && s.type.startsWith('arc')) {
           ctx.strokeStyle = '#e879f9';
           ctx.lineWidth = 1.6;
@@ -1246,6 +1283,14 @@ M30`
         ctx.moveTo(p0.x, p0.y);
         ctx.lineTo(p1.x, p1.y);
         ctx.stroke();
+
+        // Number G76 passes at start of each cut pass
+        if (s.lathe === 'G76' && s.thread && s.passLabel && s.passLabel !== lastPassLabel) {
+          lastPassLabel = s.passLabel;
+          ctx.fillStyle = '#e2e8f0';
+          ctx.font = '600 10px ui-monospace, monospace';
+          ctx.fillText(s.passLabel, p0.x + 4, p0.y - 4);
+        }
       }
       ctx.setLineDash([]);
 
@@ -1267,7 +1312,8 @@ M30`
 
       // HUD top — never under the bottom coord overlay
       const planeLabel = this.plane === 'xz' ? 'X–Z TRACE' : (this.plane === 'yz' ? 'Y–Z TRACE' : 'X–Y TRACE');
-      const dia = !!this.diameterMode;
+      // Diameter always when lathe mode or checkbox / XZ plane in lathe
+      const dia = !!this.diameterMode || !!this.latheMode;
       let xVal, yVal, zVal;
       if (this.plane === 'xz') {
         xVal = this.tool.u; yVal = 0; zVal = this.tool.v;
@@ -1276,11 +1322,11 @@ M30`
       } else {
         xVal = this.tool.u; yVal = this.tool.v; zVal = this.tool.z != null ? this.tool.z : 0;
       }
-      // Prefer full XYZ if provided
       if (this.tool.x != null) { xVal = this.tool.x; yVal = this.tool.y; zVal = this.tool.z; }
 
       const xStr = dia ? (xVal * 2).toFixed(3) + 'Ø' : xVal.toFixed(3);
-      const hud = planeLabel + '   X ' + xStr + '   Y ' + yVal.toFixed(3) + '   Z ' + zVal.toFixed(3);
+      let hud = planeLabel + '   X ' + xStr + '   Y ' + yVal.toFixed(3) + '   Z ' + zVal.toFixed(3);
+      if (this.sectionMode) hud += '   §XZ';
 
       ctx.fillStyle = 'rgba(10, 12, 16, 0.82)';
       ctx.fillRect(8, 6, Math.min(w - 16, ctx.measureText ? 0 : 280), 28);
@@ -1337,6 +1383,55 @@ M30`
       const vName = this.plane === 'xy' ? 'Y' : 'Z';
       ctx.fillText(uName + '→', w - 24, Math.min(Math.max(origin.y - 4, 12), h - 4));
       ctx.fillText(vName + '↑', Math.min(Math.max(origin.x + 4, 4), w - 24), 14);
+    }
+
+    /** Approximate XZ material section: fill under cut profile (upper side, X>0) */
+    _drawSection(ctx) {
+      if (!this.segments.length) return;
+      // Collect outermost cut X at sampled Z from executed path
+      const cuts = this.segments.filter(s =>
+        s.type === 'cut' || (s.lathe === 'G76' && s.thread)
+      );
+      if (!cuts.length) return;
+      const pts = [];
+      cuts.forEach(s => {
+        pts.push({ x: s.from.x, z: s.from.z });
+        pts.push({ x: s.to.x, z: s.to.z });
+      });
+      // Sort by Z, keep max |X| envelope (diameter side)
+      pts.sort((a, b) => a.z - b.z);
+      const envelope = [];
+      let i = 0;
+      while (i < pts.length) {
+        const z0 = pts[i].z;
+        let maxX = pts[i].x;
+        while (i < pts.length && Math.abs(pts[i].z - z0) < 0.05) {
+          maxX = Math.max(maxX, pts[i].x);
+          i++;
+        }
+        envelope.push({ x: maxX, z: z0 });
+      }
+      if (envelope.length < 2) return;
+
+      ctx.beginPath();
+      const first = this._worldToScreen(envelope[0].x, envelope[0].z);
+      // start from axis
+      const axis0 = this._worldToScreen(0, envelope[0].z);
+      ctx.moveTo(axis0.x, axis0.y);
+      ctx.lineTo(first.x, first.y);
+      for (let k = 1; k < envelope.length; k++) {
+        const p = this._worldToScreen(envelope[k].x, envelope[k].z);
+        ctx.lineTo(p.x, p.y);
+      }
+      const last = envelope[envelope.length - 1];
+      const axis1 = this._worldToScreen(0, last.z);
+      ctx.lineTo(axis1.x, axis1.y);
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(100, 116, 139, 0.35)';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(148, 163, 184, 0.6)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
     }
   }
 
@@ -2414,7 +2509,10 @@ M30`
       if (isTrace) {
         if (this.trace) {
           const dia = document.getElementById('diameter-mode');
-          this.trace.setDiameterMode(dia && dia.checked);
+          this.trace.latheMode = this.machine === 'lathe';
+          this.trace.setDiameterMode(this.machine === 'lathe' || (dia && dia.checked));
+          const sec = document.getElementById('trace-section');
+          this.trace.setSectionMode(sec && sec.checked);
           this.trace.resize();
           if (this.parseResult) {
             const segs = this._applyWcsToSegments
@@ -2505,9 +2603,25 @@ M30`
         }
         if (this.trace) {
           const dia = document.getElementById('diameter-mode');
-          this.trace.setDiameterMode(dia && dia.checked);
+          const force = this.machine === 'lathe' || (dia && dia.checked);
+          this.trace.latheMode = this.machine === 'lathe';
+          this.trace.setDiameterMode(force);
         }
       });
+      on('trace-section', 'change', (e) => {
+        if (this.trace) {
+          this.trace.setSectionMode(e.target.checked);
+          if (e.target.checked && this.trace.plane !== 'xz') {
+            this.trace.setPlane('xz');
+            document.querySelectorAll('[data-trace-plane]').forEach(b => {
+              b.classList.toggle('active', b.dataset.tracePlane === 'xz');
+            });
+          }
+        }
+      });
+
+      // Thread calculator
+      this._initThreadCalc();
 
       // WCS offsets → rebuild toolpath
       const wcsRebuild = () => {
@@ -2529,15 +2643,20 @@ M30`
           this.viewport.setMachine(this.machine);
           if (this.machine === 'lathe') {
             document.getElementById('diameter-mode').checked = true;
-            // Prefer Trace XZ for lathe
             this._setViewMode('trace');
-            if (this.trace) this.trace.setPlane('xz');
+            if (this.trace) {
+              this.trace.setPlane('xz');
+              this.trace.latheMode = true;
+              this.trace.setDiameterMode(true);
+            }
             document.querySelectorAll('[data-view]').forEach(b => b.classList.remove('active'));
             const tr = document.querySelector('[data-view="trace"]');
             if (tr) tr.classList.add('active');
             document.querySelectorAll('[data-trace-plane]').forEach(b => {
               b.classList.toggle('active', b.dataset.tracePlane === 'xz');
             });
+          } else if (this.trace) {
+            this.trace.latheMode = false;
           }
           // Show A/C for 5-axis
           const showRot = this.machine === '5axis';
@@ -3049,7 +3168,8 @@ M30`
     },
 
     _updateCoordDisplay(x, y, z) {
-      const dia = document.getElementById('diameter-mode') && document.getElementById('diameter-mode').checked;
+      const chk = document.getElementById('diameter-mode');
+      const dia = this.machine === 'lathe' || (chk && chk.checked);
       if (dia) {
         document.getElementById('pos-x').textContent = (x * 2).toFixed(3) + 'Ø';
       } else {
@@ -3057,6 +3177,150 @@ M30`
       }
       document.getElementById('pos-y').textContent = y.toFixed(3);
       document.getElementById('pos-z').textContent = z.toFixed(3);
+    },
+
+    _initThreadCalc() {
+      // ISO metric coarse (Ø, pitch, minor approx)
+      const METRIC = [
+        { name: 'M3×0.5', od: 3, pitch: 0.5, minor: 2.387 },
+        { name: 'M4×0.7', od: 4, pitch: 0.7, minor: 3.141 },
+        { name: 'M5×0.8', od: 5, pitch: 0.8, minor: 4.019 },
+        { name: 'M6×1', od: 6, pitch: 1.0, minor: 4.917 },
+        { name: 'M8×1.25', od: 8, pitch: 1.25, minor: 6.647 },
+        { name: 'M10×1.5', od: 10, pitch: 1.5, minor: 8.376 },
+        { name: 'M12×1.75', od: 12, pitch: 1.75, minor: 10.106 },
+        { name: 'M14×2', od: 14, pitch: 2.0, minor: 11.835 },
+        { name: 'M16×2', od: 16, pitch: 2.0, minor: 13.835 },
+        { name: 'M18×2.5', od: 18, pitch: 2.5, minor: 15.294 },
+        { name: 'M20×2.5', od: 20, pitch: 2.5, minor: 17.294 },
+        { name: 'M24×3', od: 24, pitch: 3.0, minor: 20.752 }
+      ];
+      // UNC/UNF common (size, TPI, major inch)
+      const UN = [
+        { name: '1/4-20 UNC', odIn: 0.25, tpi: 20 },
+        { name: '5/16-18 UNC', odIn: 0.3125, tpi: 18 },
+        { name: '3/8-16 UNC', odIn: 0.375, tpi: 16 },
+        { name: '1/2-13 UNC', odIn: 0.5, tpi: 13 },
+        { name: '5/8-11 UNC', odIn: 0.625, tpi: 11 },
+        { name: '3/4-10 UNC', odIn: 0.75, tpi: 10 },
+        { name: '1/4-28 UNF', odIn: 0.25, tpi: 28 },
+        { name: '5/16-24 UNF', odIn: 0.3125, tpi: 24 },
+        { name: '3/8-24 UNF', odIn: 0.375, tpi: 24 },
+        { name: '1/2-20 UNF', odIn: 0.5, tpi: 20 }
+      ];
+      this._threadTables = { METRIC, UN };
+
+      const mSel = document.getElementById('thr-table-metric');
+      const uSel = document.getElementById('thr-table-un');
+      if (mSel) {
+        mSel.innerHTML = METRIC.map((r, i) =>
+          '<option value="' + i + '">' + r.name + '  Ø' + r.od + '  P' + r.pitch + '</option>'
+        ).join('');
+      }
+      if (uSel) {
+        uSel.innerHTML = UN.map((r, i) =>
+          '<option value="' + i + '">' + r.name + '  ' + r.tpi + ' TPI</option>'
+        ).join('');
+      }
+
+      const fillFromMetric = (r) => {
+        document.getElementById('thr-od').value = r.od;
+        document.getElementById('thr-pitch').value = r.pitch;
+        document.getElementById('thr-minor').value = r.minor.toFixed(3);
+        document.getElementById('thr-height').value = ((r.od - r.minor) / 2).toFixed(4);
+        document.getElementById('thr-f').value = r.pitch;
+      };
+      const fillFromUn = (r) => {
+        const od = r.odIn * 25.4;
+        const pitch = 25.4 / r.tpi;
+        // approx minor for 60°: H = 0.866025 * pitch; minor ≈ od - 5/4 H * 2? external minor ≈ od - 1.0825*pitch
+        const minor = od - 1.082532 * pitch;
+        document.getElementById('thr-od').value = od.toFixed(3);
+        document.getElementById('thr-pitch').value = pitch.toFixed(4);
+        document.getElementById('thr-minor').value = minor.toFixed(3);
+        document.getElementById('thr-height').value = ((od - minor) / 2).toFixed(4);
+        document.getElementById('thr-f').value = pitch.toFixed(4);
+      };
+
+      if (mSel) {
+        mSel.addEventListener('change', () => {
+          const r = METRIC[+mSel.value];
+          if (r) fillFromMetric(r);
+        });
+        mSel.selectedIndex = 6; // M12
+        fillFromMetric(METRIC[6]);
+      }
+      if (uSel) {
+        uSel.addEventListener('change', () => {
+          const r = UN[+uSel.value];
+          if (r) fillFromUn(r);
+        });
+      }
+
+      document.querySelectorAll('[data-thr-sys]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          document.querySelectorAll('[data-thr-sys]').forEach(b => b.classList.remove('active'));
+          btn.classList.add('active');
+          const isM = btn.dataset.thrSys === 'metric';
+          document.getElementById('thr-metric-panel').classList.toggle('hidden', !isM);
+          document.getElementById('thr-un-panel').classList.toggle('hidden', isM);
+        });
+      });
+
+      const on = (id, ev, fn) => {
+        const el = document.getElementById(id);
+        if (el) el.addEventListener(ev, fn);
+      };
+      on('btn-thread-calc', 'click', () => {
+        document.getElementById('thread-calc-modal').classList.remove('hidden');
+      });
+      on('thread-calc-close', 'click', () => {
+        document.getElementById('thread-calc-modal').classList.add('hidden');
+      });
+      const bd = document.querySelector('#thread-calc-modal .modal-backdrop');
+      if (bd) bd.addEventListener('click', () => {
+        document.getElementById('thread-calc-modal').classList.add('hidden');
+      });
+      on('btn-thr-to-g76', 'click', () => {
+        const od = +document.getElementById('thr-od').value;
+        const pitch = +document.getElementById('thr-pitch').value;
+        const minor = +document.getElementById('thr-minor').value;
+        const Z = +document.getElementById('thr-z').value || -20;
+        const Q = +document.getElementById('thr-q').value || 0.2;
+        const height = (od - minor) / 2;
+        const Pmic = Math.round(height * 1000);
+        const Qmic = Math.round(Q * 1000);
+        const clear = od + 2;
+        const code = [
+          '; Rosca generada — Ø' + od.toFixed(3) + ' paso ' + pitch.toFixed(4),
+          'G21 G90 G18',
+          'G54',
+          'T3 M6',
+          'S600 M3',
+          'G0 X' + clear.toFixed(3) + ' Z5',
+          'G0 Z2',
+          'G76 P020060 Q' + Qmic + ' R0.05',
+          'G76 X' + minor.toFixed(3) + ' Z' + Z + ' P' + Pmic + ' Q' + Qmic + ' F' + pitch.toFixed(4),
+          'G0 X' + clear.toFixed(3) + ' Z5',
+          'M5',
+          'M30'
+        ].join('\n');
+        this.editor.setValue(code);
+        this._pushHistory();
+        this.machine = 'lathe';
+        document.querySelectorAll('.machine-tabs .tab').forEach(b => {
+          b.classList.toggle('active', b.dataset.machine === 'lathe');
+        });
+        document.getElementById('diameter-mode').checked = true;
+        document.getElementById('thread-calc-modal').classList.add('hidden');
+        this._reparse();
+        this._setViewMode('trace');
+        if (this.trace) {
+          this.trace.setPlane('xz');
+          this.trace.latheMode = true;
+          this.trace.setDiameterMode(true);
+        }
+      });
     },
 
     _download(filename, content, mime) {
