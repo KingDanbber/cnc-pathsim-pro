@@ -2369,9 +2369,26 @@ M30`
           'Ctrl-Y': () => { this._redo(); return true; },
           'Cmd-Shift-Z': () => { this._redo(); return true; },
           'Ctrl-S': () => { this._autosave(true); return true; },
-          'Cmd-S': () => { this._autosave(true); return true; }
+          'Cmd-S': () => { this._autosave(true); return true; },
+          'Ctrl-A': (cm) => { cm.execCommand('selectAll'); return true; },
+          'Cmd-A': (cm) => { cm.execCommand('selectAll'); return true; },
+          'Ctrl-D': (cm) => { this._selectCurrentLine(cm); return true; },
+          'Cmd-D': (cm) => { this._selectCurrentLine(cm); return true; },
+          'Ctrl-C': (cm) => { this._editorCopy(cm); return true; },
+          'Cmd-C': (cm) => { this._editorCopy(cm); return true; },
+          'Ctrl-X': (cm) => { this._editorCut(cm); return true; },
+          'Cmd-X': (cm) => { this._editorCut(cm); return true; },
+          'Ctrl-V': (cm) => { this._editorPaste(cm); return true; },
+          'Cmd-V': (cm) => { this._editorPaste(cm); return true; }
         }
       });
+
+      // Internal clipboard for mobile when system clipboard is restricted
+      this._editorClip = '';
+      this._selAnchorLine = null;
+
+      this.editor.on('cursorActivity', () => this._updateSelStatus());
+      this._bindMobileLineSelect();
 
       // Kill mobile autocorrect / capitalize (causes G0X3.5 → 5.G0X3 style glitches)
       const input = this.editor.getInputField();
@@ -2754,6 +2771,18 @@ M30`
         try { localStorage.removeItem('cnc-gcode-autosave'); } catch (_) {}
         this._reparse();
       });
+      const onEd = (id, fn) => {
+        const el = document.getElementById(id);
+        if (el) el.addEventListener('click', fn);
+      };
+      onEd('btn-copy', () => this._editorCopy(this.editor));
+      onEd('btn-cut', () => this._editorCut(this.editor));
+      onEd('btn-paste', () => this._editorPaste(this.editor));
+      onEd('btn-sel-line', () => this._selectCurrentLine(this.editor));
+      onEd('btn-sel-start', () => this._markSelStart());
+      onEd('btn-sel-end', () => this._markSelEnd());
+      onEd('btn-sel-range', () => this._selectLineRangeFromInputs());
+
       document.getElementById('btn-format').addEventListener('click', () => {
         const lines = this.editor.getValue().split('\n').map(l => l.trimEnd());
         this.editor.setValue(lines.join('\n'));
@@ -3198,6 +3227,244 @@ M30`
       }
       document.getElementById('pos-y').textContent = y.toFixed(3);
       document.getElementById('pos-z').textContent = z.toFixed(3);
+    },
+
+    _updateSelStatus() {
+      const el = document.getElementById('sel-status');
+      if (!el || !this.editor) return;
+      if (!this.editor.somethingSelected()) {
+        const cur = this.editor.getCursor();
+        el.textContent = 'L' + (cur.line + 1);
+        return;
+      }
+      const from = this.editor.getCursor('from');
+      const to = this.editor.getCursor('to');
+      const n = this.editor.getSelection().split('\n').length;
+      if (from.line === to.line) {
+        el.textContent = 'L' + (from.line + 1) + ' (' + (to.ch - from.ch) + ' car)';
+      } else {
+        el.textContent = 'L' + (from.line + 1) + '–' + (to.line + 1) + ' (' + n + ' líneas)';
+      }
+    },
+
+    _selectCurrentLine(cm) {
+      cm = cm || this.editor;
+      if (!cm) return;
+      const line = cm.getCursor().line;
+      cm.setSelection({ line: line, ch: 0 }, { line: line, ch: cm.getLine(line).length });
+      cm.focus();
+      this._updateSelStatus();
+    },
+
+    /** Select inclusive line range (1-based UI → 0-based CM) */
+    _selectLines(from1, to1) {
+      const cm = this.editor;
+      if (!cm) return;
+      const last = cm.lineCount();
+      let a = Math.max(1, Math.min(last, parseInt(from1, 10) || 1));
+      let b = Math.max(1, Math.min(last, parseInt(to1, 10) || a));
+      if (a > b) { const t = a; a = b; b = t; }
+      cm.setSelection(
+        { line: a - 1, ch: 0 },
+        { line: b - 1, ch: cm.getLine(b - 1).length }
+      );
+      cm.focus();
+      this._updateSelStatus();
+      const fromEl = document.getElementById('sel-from');
+      const toEl = document.getElementById('sel-to');
+      if (fromEl) fromEl.value = a;
+      if (toEl) toEl.value = b;
+    },
+
+    _selectLineRangeFromInputs() {
+      const fromEl = document.getElementById('sel-from');
+      const toEl = document.getElementById('sel-to');
+      this._selectLines(fromEl && fromEl.value, toEl && toEl.value);
+    },
+
+    _markSelStart() {
+      const cm = this.editor;
+      if (!cm) return;
+      this._selAnchorLine = cm.getCursor().line;
+      this._highlightAnchorLine();
+      const st = document.getElementById('parse-status');
+      if (st) st.textContent = 'Inicio L' + (this._selAnchorLine + 1) + ' — ve al final y pulsa B▴';
+      const fromEl = document.getElementById('sel-from');
+      if (fromEl) fromEl.value = this._selAnchorLine + 1;
+      cm.focus();
+    },
+
+    _markSelEnd() {
+      const cm = this.editor;
+      if (!cm) return;
+      const end = cm.getCursor().line;
+      if (this._selAnchorLine == null) {
+        this._selAnchorLine = end;
+        this._selectCurrentLine(cm);
+        return;
+      }
+      this._selectLines(this._selAnchorLine + 1, end + 1);
+      const st = document.getElementById('parse-status');
+      if (st) {
+        const a = Math.min(this._selAnchorLine, end) + 1;
+        const b = Math.max(this._selAnchorLine, end) + 1;
+        st.textContent = 'Sel L' + a + '–' + b;
+      }
+    },
+
+    _highlightAnchorLine() {
+      const cm = this.editor;
+      if (!cm) return;
+      if (this._anchorMark) {
+        this._anchorMark.clear();
+        this._anchorMark = null;
+      }
+      if (this._selAnchorLine == null) return;
+      this._anchorMark = cm.addLineClass(this._selAnchorLine, 'background', 'cm-sel-anchor-line');
+    },
+
+    /**
+     * Mobile multi-line select:
+     * - Tap line number = set/extend selection
+     * - First gutter tap = anchor, second = range
+     */
+    _bindMobileLineSelect() {
+      const cm = this.editor;
+      if (!cm) return;
+      const wrapper = cm.getWrapperElement();
+      const onGutterTap = (clientY, extend) => {
+        const rect = wrapper.getBoundingClientRect();
+        // Approximate line from Y relative to scroller
+        const pos = cm.coordsChar({ left: rect.left + 20, top: clientY }, 'window');
+        if (pos.line < 0) return;
+        if (this._selAnchorLine == null || !extend) {
+          this._selAnchorLine = pos.line;
+          this._highlightAnchorLine();
+          cm.setSelection(
+            { line: pos.line, ch: 0 },
+            { line: pos.line, ch: cm.getLine(pos.line).length }
+          );
+          const st = document.getElementById('parse-status');
+          if (st) st.textContent = 'Inicio L' + (pos.line + 1) + ' — toca otra línea #';
+        } else {
+          this._selectLines(this._selAnchorLine + 1, pos.line + 1);
+          const st = document.getElementById('parse-status');
+          if (st) {
+            const a = Math.min(this._selAnchorLine, pos.line) + 1;
+            const b = Math.max(this._selAnchorLine, pos.line) + 1;
+            st.textContent = 'Sel L' + a + '–' + b + ' — Copiar';
+          }
+          // Reset anchor so next single tap starts fresh
+          this._selAnchorLine = null;
+          if (this._anchorMark) { this._anchorMark.clear(); this._anchorMark = null; }
+        }
+        this._updateSelStatus();
+      };
+
+      // Gutter clicks (mouse)
+      cm.on('gutterClick', (cmInst, line, gutter, ev) => {
+        if (gutter !== 'CodeMirror-linenumbers') return;
+        const extend = !!(ev && (ev.shiftKey || this._selAnchorLine != null));
+        if (this._selAnchorLine == null) {
+          this._selAnchorLine = line;
+          this._highlightAnchorLine();
+          cmInst.setSelection(
+            { line: line, ch: 0 },
+            { line: line, ch: cmInst.getLine(line).length }
+          );
+          const st = document.getElementById('parse-status');
+          if (st) st.textContent = 'Inicio L' + (line + 1) + ' — toca otra línea #';
+        } else {
+          this._selectLines(this._selAnchorLine + 1, line + 1);
+          this._selAnchorLine = null;
+          if (this._anchorMark) { this._anchorMark.clear(); this._anchorMark = null; }
+        }
+        this._updateSelStatus();
+        if (ev) { ev.preventDefault(); ev.stopPropagation(); }
+      });
+
+      // Touch on gutter area (left 40px)
+      let touchStartX = 0, touchStartY = 0, touchMoved = false;
+      wrapper.addEventListener('touchstart', (e) => {
+        if (!e.touches || !e.touches[0]) return;
+        touchStartX = e.touches[0].clientX;
+        touchStartY = e.touches[0].clientY;
+        touchMoved = false;
+        const rect = wrapper.getBoundingClientRect();
+        this._gutterTouch = (touchStartX - rect.left) < 36;
+      }, { passive: true });
+      wrapper.addEventListener('touchmove', (e) => {
+        if (!e.touches || !e.touches[0]) return;
+        const dx = Math.abs(e.touches[0].clientX - touchStartX);
+        const dy = Math.abs(e.touches[0].clientY - touchStartY);
+        if (dx > 8 || dy > 8) touchMoved = true;
+      }, { passive: true });
+      wrapper.addEventListener('touchend', (e) => {
+        if (!this._gutterTouch || touchMoved) return;
+        const t = e.changedTouches && e.changedTouches[0];
+        if (!t) return;
+        e.preventDefault();
+        onGutterTap(t.clientY, true);
+      }, { passive: false });
+    },
+
+    _editorCopy(cm) {
+      cm = cm || this.editor;
+      if (!cm) return;
+      let text = cm.getSelection();
+      if (!text) {
+        // Nothing selected → copy current line
+        const line = cm.getCursor().line;
+        text = cm.getLine(line);
+      }
+      this._editorClip = text;
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).catch(() => {});
+      }
+      const st = document.getElementById('parse-status');
+      if (st) {
+        st.textContent = 'Copiado (' + text.split('\n').length + ' lín.)';
+        setTimeout(() => { if (st.textContent.indexOf('Copiado') === 0) st.textContent = 'Listo'; }, 1500);
+      }
+      cm.focus();
+    },
+
+    _editorCut(cm) {
+      cm = cm || this.editor;
+      if (!cm) return;
+      let text = cm.getSelection();
+      if (!text) {
+        const line = cm.getCursor().line;
+        text = cm.getLine(line);
+        cm.setSelection({ line: line, ch: 0 }, { line: line + 1, ch: 0 });
+      }
+      this._editorClip = text;
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).catch(() => {});
+      }
+      cm.replaceSelection('');
+      this._pushHistory();
+      cm.focus();
+      this._updateSelStatus();
+    },
+
+    _editorPaste(cm) {
+      cm = cm || this.editor;
+      if (!cm) return;
+      const doPaste = (text) => {
+        if (text == null || text === '') return;
+        cm.replaceSelection(text);
+        this._pushHistory();
+        cm.focus();
+        this._updateSelStatus();
+      };
+      if (navigator.clipboard && navigator.clipboard.readText) {
+        navigator.clipboard.readText()
+          .then(t => doPaste(t || this._editorClip))
+          .catch(() => doPaste(this._editorClip));
+      } else {
+        doPaste(this._editorClip);
+      }
     },
 
     _initThreadCalc() {

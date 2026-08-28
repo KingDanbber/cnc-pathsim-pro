@@ -260,7 +260,7 @@ body.theme-light .icon-moon { display: none; }
   letter-spacing: 0.06em;
   color: var(--text-secondary);
 }
-.panel-actions { display: flex; gap: 6px; }
+.panel-actions { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; justify-content: flex-end; max-width: 100%; }
 
 /* ===== Editor ===== */
 .panel-editor { background: var(--bg-elevated); }
@@ -888,3 +888,25 @@ body.theme-light .coord-display {
 .wcs-table-wrap input[type="number"] { width: 52px; }
 .wcs-table-wrap input[type="radio"] { accent-color: var(--accent); margin-right: 4px; }
 .wcs-table-wrap label { display: flex; align-items: center; font-size: 12px; cursor: pointer; }
+
+.sel-range {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.sel-range input[type="number"] {
+  width: 42px;
+  padding: 2px 4px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+}
+.CodeMirror-linenumber { cursor: pointer; }
+.cm-sel-anchor-line {
+  background: rgba(59, 130, 246, 0.18) !important;
+}

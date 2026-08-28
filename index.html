@@ -83,6 +83,12 @@
           <div class="panel-actions">
             <button id="btn-undo" class="btn-sm" title="Deshacer (Ctrl+Z)">Undo</button>
             <button id="btn-redo" class="btn-sm" title="Rehacer (Ctrl+Y)">Redo</button>
+            <button id="btn-copy" class="btn-sm" title="Copiar selección (Ctrl+C)">Copiar</button>
+            <button id="btn-cut" class="btn-sm" title="Cortar selección (Ctrl+X)">Cortar</button>
+            <button id="btn-paste" class="btn-sm" title="Pegar (Ctrl+V)">Pegar</button>
+            <button id="btn-sel-line" class="btn-sm" title="Seleccionar línea actual">Línea</button>
+            <button id="btn-sel-start" class="btn-sm" title="Marcar inicio del bloque (línea del cursor)">A▾</button>
+            <button id="btn-sel-end" class="btn-sm" title="Seleccionar hasta aquí (desde marca A)">B▴</button>
             <button id="btn-format" class="btn-sm" title="Formatear">Fmt</button>
             <button id="btn-clear" class="btn-sm" title="Limpiar">Limpiar</button>
           </div>
@@ -92,6 +98,12 @@
         </div>
         <div class="editor-status">
           <span id="line-count">0 líneas</span>
+          <span id="sel-status" title="Selección actual">Sel: —</span>
+          <span class="sel-range" title="Seleccionar rango de líneas">
+            L<input type="number" id="sel-from" min="1" value="1" />–
+            <input type="number" id="sel-to" min="1" value="1" />
+            <button type="button" id="btn-sel-range" class="btn-sm">Sel</button>
+          </span>
           <span id="parse-status">Listo</span>
         </div>
       </section>
