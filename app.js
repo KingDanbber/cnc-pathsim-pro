@@ -352,6 +352,22 @@ G1 Z0
 N40 G0 X45
 G0 Z5
 M5
+M30`,
+
+    g76: `; Torno — roscado G76 (M12x1.75 visual)
+; X = diámetro, F = paso, Q = DOC (mm o 1/1000), P = altura rosca
+G21 G90 G18
+G54
+T3 M6
+S600 M3
+G0 X14 Z5
+G0 Z2
+; Bloque 1: parámetros
+G76 P020060 Q100 R0.05
+; Bloque 2: trayectoria
+G76 X10.106 Z-20 P947 Q200 F1.75
+G0 X20 Z5
+M5
 M30`
   };
 
@@ -387,7 +403,10 @@ M30`
         initialZ: 0,
         latheU: 0,   // G71 depth of cut (radius)
         latheW: 0,   // G72 depth of cut (Z)
-        latheMode: null // 'G71' | 'G72' | null
+        latheMode: null, // 'G71' | 'G72' | 'G76' | null
+        g76Q: 0.2,   // first/DOC radial (mm)
+        g76R: 0,     // finish allowance
+        g76P: 0      // thread height (radius, mm)
       };
       this.segments = [];
       this.stats = { moves: 0, distance: 0, rapids: 0, cuts: 0, arcs: 0, cycles: 0, dwellSec: 0 };
@@ -734,20 +753,43 @@ M30`
           changed = true;
         }
         else if (g === 71) {
-          // Lathe roughing turning — U = DOC (radius)
           s.latheMode = 'G71';
           if (words.U !== undefined) s.latheU = Math.abs(words.U);
           if (words.W !== undefined) s.latheW = Math.abs(words.W);
           changed = true;
         }
         else if (g === 72) {
-          // Lathe facing roughing — W = DOC in Z
           s.latheMode = 'G72';
           if (words.W !== undefined) s.latheW = Math.abs(words.W);
           if (words.U !== undefined) s.latheU = Math.abs(words.U);
           changed = true;
         }
+        else if (g === 76) {
+          // Threading cycle — first block may only set P/Q/R; second has X Z F
+          s.latheMode = 'G76';
+          if (words.Q !== undefined) {
+            const q = Math.abs(words.Q);
+            s.g76Q = q >= 10 ? q / 1000 : q; // Fanuc often 1/1000 mm
+          }
+          if (words.R !== undefined) {
+            const r = Math.abs(words.R);
+            s.g76R = r >= 10 ? r / 1000 : r;
+          }
+          if (words.P !== undefined && words.X === undefined && words.Z === undefined) {
+            // First-block P (aa bb cc) — ignore for visual
+          } else if (words.P !== undefined) {
+            const p = Math.abs(words.P);
+            s.g76P = p >= 20 ? p / 1000 : p; // thread height microns → mm
+          }
+          if (words.F !== undefined) s.f = words.F; // pitch
+          changed = true;
+        }
         else if (g >= 54 && g <= 59) { s.wcs = 'G' + g; }
+      }
+
+      // G76 second block with X/Z → expand threading passes
+      if (words.G === 76 && (words.X !== undefined || words.Z !== undefined)) {
+        return this._expandG76(lineNum, raw, words);
       }
       if (words.D !== undefined) s.compD = words.D;
 
@@ -889,6 +931,80 @@ M30`
         comp: s.comp, compD: s.compD
       });
       return [seg];
+    }
+
+    _expandG76(lineNum, raw, words) {
+      const s = this.state;
+      const from = { x: s.x, y: s.y, z: s.z, a: s.a, c: s.c };
+      let endX = from.x, endZ = from.z;
+      if (words.X !== undefined) endX = s.absolute ? words.X : from.x + words.X;
+      if (words.Z !== undefined) endZ = s.absolute ? words.Z : from.z + words.Z;
+      if (words.F !== undefined) s.f = words.F;
+      if (words.Q !== undefined) {
+        const q = Math.abs(words.Q);
+        s.g76Q = q >= 10 ? q / 1000 : q;
+      }
+      if (words.P !== undefined) {
+        const p = Math.abs(words.P);
+        s.g76P = p >= 20 ? p / 1000 : p;
+      }
+
+      const pitch = s.f > 0 ? s.f : 1.5;
+      const doc = Math.max(s.g76Q || 0.2, 0.05);
+      const finish = s.g76R || 0;
+
+      let startX = Math.max(from.x, endX);
+      if (s.g76P > 0) startX = Math.max(startX, endX + 2 * s.g76P);
+      const targetX = endX + (finish > 0 ? 2 * finish : 0);
+      const clearX = startX + Math.max(2, Math.abs(startX - endX) * 0.1);
+      const zStart = from.z;
+      const zEnd = endZ;
+
+      const radialSpan = Math.abs(startX - targetX) / 2;
+      const passes = Math.max(1, Math.min(40, Math.ceil(radialSpan / Math.max(doc, 0.05))));
+      const segs = [];
+      let cur = { ...from };
+
+      const toClear = { x: clearX, y: cur.y, z: zStart, a: cur.a, c: cur.c };
+      if (cur.x !== clearX || cur.z !== zStart) {
+        segs.push(this._makeSeg(lineNum, raw, 'rapid', cur, toClear, { lathe: 'G76' }));
+        cur = toClear;
+      }
+
+      for (let i = 1; i <= passes; i++) {
+        const t = i / passes;
+        const xPass = startX + (targetX - startX) * t;
+        const toStart = { x: xPass, y: cur.y, z: zStart, a: cur.a, c: cur.c };
+        segs.push(this._makeSeg(lineNum, raw, 'rapid', cur, toStart, { lathe: 'G76' }));
+        cur = toStart;
+        const toEnd = { x: xPass, y: cur.y, z: zEnd, a: cur.a, c: cur.c };
+        segs.push(this._makeSeg(lineNum, raw, 'cut', cur, toEnd, {
+          lathe: 'G76', feed: pitch, words
+        }));
+        cur = toEnd;
+        const toRet = { x: clearX, y: cur.y, z: zEnd, a: cur.a, c: cur.c };
+        segs.push(this._makeSeg(lineNum, raw, 'rapid', cur, toRet, { lathe: 'G76' }));
+        cur = toRet;
+        const toZ0 = { x: clearX, y: cur.y, z: zStart, a: cur.a, c: cur.c };
+        segs.push(this._makeSeg(lineNum, raw, 'rapid', cur, toZ0, { lathe: 'G76' }));
+        cur = toZ0;
+      }
+
+      if (Math.abs(targetX - endX) > 1e-4) {
+        const toStart = { x: endX, y: cur.y, z: zStart, a: cur.a, c: cur.c };
+        segs.push(this._makeSeg(lineNum, raw, 'rapid', cur, toStart, { lathe: 'G76' }));
+        cur = toStart;
+        const toEnd = { x: endX, y: cur.y, z: zEnd, a: cur.a, c: cur.c };
+        segs.push(this._makeSeg(lineNum, raw, 'cut', cur, toEnd, { lathe: 'G76', feed: pitch, words }));
+        cur = toEnd;
+        const toRet = { x: clearX, y: cur.y, z: zEnd, a: cur.a, c: cur.c };
+        segs.push(this._makeSeg(lineNum, raw, 'rapid', cur, toRet, { lathe: 'G76' }));
+        cur = toRet;
+      }
+
+      s.x = cur.x; s.y = cur.y; s.z = cur.z;
+      this.stats.cycles++;
+      return segs;
     }
 
     _computeArc(from, to, words, type, plane) {
@@ -2351,12 +2467,32 @@ M30`
         btn.addEventListener('click', () => {
           document.querySelectorAll('[data-tpl]').forEach(b => b.classList.remove('active'));
           btn.classList.add('active');
-          ['face', 'pocket', 'lathe'].forEach(id => {
+          ['face', 'pocket', 'lathe', 'thread'].forEach(id => {
             const f = document.getElementById('tpl-' + id);
             if (f) f.classList.toggle('hidden', btn.dataset.tpl !== id);
           });
         });
       });
+      // Metric thread presets
+      const thrSel = document.getElementById('tpl-thr-metric');
+      if (thrSel) {
+        const METRIC = {
+          6:  { od: 6,  pitch: 1.0,  minor: 4.917 },
+          8:  { od: 8,  pitch: 1.25, minor: 6.647 },
+          10: { od: 10, pitch: 1.5,  minor: 8.376 },
+          12: { od: 12, pitch: 1.75, minor: 10.106 },
+          14: { od: 14, pitch: 2.0,  minor: 11.835 },
+          16: { od: 16, pitch: 2.0,  minor: 13.835 },
+          20: { od: 20, pitch: 2.5,  minor: 17.294 }
+        };
+        thrSel.addEventListener('change', () => {
+          const m = METRIC[thrSel.value];
+          if (!m) return;
+          document.getElementById('tpl-thr-od').value = m.od;
+          document.getElementById('tpl-thr-pitch').value = m.pitch;
+        });
+        this._metricThreads = METRIC;
+      }
       on('btn-gen-template', 'click', () => {
         this._generateTemplate();
         const m = document.getElementById('templates-modal');
@@ -2648,7 +2784,7 @@ M30`
       this._pushHistory();
       this._autosave(false);
       this._reparse();
-      if (name === 'lathe' || name === 'latheface') {
+      if (name === 'lathe' || name === 'latheface' || name === 'g76') {
         this.machine = 'lathe';
         document.querySelectorAll('.machine-tabs .tab').forEach(b => {
           b.classList.toggle('active', b.dataset.machine === 'lathe');
@@ -2725,7 +2861,7 @@ M30`
         }
         lines.push('G0 Z30', 'M5', 'M30');
         code = lines.join('\n');
-      } else {
+      } else if (kind === 'lathe') {
         // lathe OD roughing
         const od = +document.getElementById('tpl-lat-od').value || 40;
         const id = +document.getElementById('tpl-lat-id').value || 28;
@@ -2759,12 +2895,47 @@ M30`
           b.classList.toggle('active', b.dataset.machine === 'lathe');
         });
         document.getElementById('diameter-mode').checked = true;
+      } else if (kind === 'thread') {
+        const METRIC = this._metricThreads || {};
+        const key = document.getElementById('tpl-thr-metric').value;
+        const preset = METRIC[key] || { od: 12, pitch: 1.75, minor: 10.106 };
+        const od = +document.getElementById('tpl-thr-od').value || preset.od;
+        const pitch = +document.getElementById('tpl-thr-pitch').value || preset.pitch;
+        const Z = +document.getElementById('tpl-thr-z').value || -20;
+        const Q = +document.getElementById('tpl-thr-q').value || 0.2;
+        const S = +document.getElementById('tpl-thr-s').value || 600;
+        // Minor diameter approx for ISO metric: d - 1.082532 * pitch
+        const minor = preset.minor || (od - 1.082532 * pitch);
+        const height = (od - minor) / 2; // radius height
+        const Pmic = Math.round(height * 1000);
+        const Qmic = Math.round(Q * 1000);
+        const clear = od + 2;
+        code = [
+          '; Rosca métrica M' + key + ' × ' + pitch + ' — G76 visual',
+          '; Ø mayor ' + od + '  Ø menor ≈ ' + minor.toFixed(3) + '  paso ' + pitch,
+          'G21 G90 G18',
+          'G54',
+          'T3 M6',
+          'S' + S + ' M3',
+          'G0 X' + clear + ' Z5',
+          'G0 Z2',
+          'G76 P020060 Q' + Qmic + ' R0.05',
+          'G76 X' + minor.toFixed(3) + ' Z' + Z + ' P' + Pmic + ' Q' + Qmic + ' F' + pitch,
+          'G0 X' + clear + ' Z5',
+          'M5',
+          'M30'
+        ].join('\n');
+        this.machine = 'lathe';
+        document.querySelectorAll('.machine-tabs .tab').forEach(b => {
+          b.classList.toggle('active', b.dataset.machine === 'lathe');
+        });
+        document.getElementById('diameter-mode').checked = true;
       }
       this.editor.setValue(code);
       this._pushHistory();
       this._autosave(false);
       this._reparse();
-      if (kind === 'lathe') {
+      if (kind === 'lathe' || kind === 'thread') {
         this._setViewMode('trace');
         if (this.trace) this.trace.setPlane('xz');
       }
@@ -2776,7 +2947,7 @@ M30`
       const knownG = {
         0:1,1:1,2:1,3:1,17:1,18:1,19:1,20:1,21:1,28:1,40:1,41:1,42:1,
         54:1,55:1,56:1,57:1,58:1,59:1,80:1,81:1,82:1,83:1,84:1,85:1,86:1,89:1,
-        90:1,91:1,98:1,99:1,71:1,72:1
+        90:1,91:1,98:1,99:1,71:1,72:1,76:1
       };
       let lastMotion = 'G0';
       let sawTool = false;
