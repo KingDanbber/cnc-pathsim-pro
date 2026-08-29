@@ -1161,6 +1161,7 @@ M30`
 
     setTool(x, y, z) {
       if (this.plane === 'xz') this.tool = { u: x, v: z, x, y, z };
+      else if (this.plane === 'zx') this.tool = { u: z, v: x, x, y, z }; // Z horiz, X vert (ej. 1A)
       else if (this.plane === 'yz') this.tool = { u: y, v: z, x, y, z };
       else this.tool = { u: x, v: y, x, y, z };
       this.draw();
@@ -1182,7 +1183,8 @@ M30`
     }
 
     _proj(p) {
-      if (this.plane === 'xz') return { u: p.x, v: p.z };
+      if (this.plane === 'xz') return { u: p.x, v: p.z };       // X→ horiz, Z↑ vert
+      if (this.plane === 'zx') return { u: p.z, v: p.x };       // Z→ horiz, X↑ vert (torno 1A)
       if (this.plane === 'yz') return { u: p.y, v: p.z };
       return { u: p.x, v: p.y };
     }
@@ -1250,7 +1252,7 @@ M30`
       ctx.fillRect(0, 0, w, h);
       this._drawGrid(ctx, w, h);
       this._drawAxes(ctx, w, h);
-      if (this.sectionMode && this.plane === 'xz') this._drawSection(ctx);
+      if (this.sectionMode && (this.plane === 'xz' || this.plane === 'zx')) this._drawSection(ctx);
 
       const n = this.segments.length;
       const maxI = Math.floor(n * this.progress);
@@ -1332,12 +1334,17 @@ M30`
       ctx.fill();
 
       // HUD top — never under the bottom coord overlay
-      const planeLabel = this.plane === 'xz' ? 'X–Z TRACE' : (this.plane === 'yz' ? 'Y–Z TRACE' : 'X–Y TRACE');
-      // Diameter always when lathe mode or checkbox / XZ plane in lathe
+      const planeLabel =
+        this.plane === 'xz' ? 'X–Z TRACE' :
+        this.plane === 'zx' ? 'Z–X TRACE' :
+        this.plane === 'yz' ? 'Y–Z TRACE' : 'X–Y TRACE';
+      // Diameter always when lathe mode or checkbox
       const dia = !!this.diameterMode || !!this.latheMode;
       let xVal, yVal, zVal;
       if (this.plane === 'xz') {
         xVal = this.tool.u; yVal = 0; zVal = this.tool.v;
+      } else if (this.plane === 'zx') {
+        zVal = this.tool.u; xVal = this.tool.v; yVal = 0;
       } else if (this.plane === 'yz') {
         xVal = 0; yVal = this.tool.u; zVal = this.tool.v;
       } else {
@@ -1400,16 +1407,17 @@ M30`
       ctx.setLineDash([]);
       ctx.fillStyle = '#64748b';
       ctx.font = '10px ui-monospace, monospace';
-      const uName = this.plane === 'yz' ? 'Y' : 'X';
-      const vName = this.plane === 'xy' ? 'Y' : 'Z';
+      let uName = 'X', vName = 'Y';
+      if (this.plane === 'xz') { uName = 'X'; vName = 'Z'; }
+      else if (this.plane === 'zx') { uName = 'Z'; vName = 'X'; }
+      else if (this.plane === 'yz') { uName = 'Y'; vName = 'Z'; }
       ctx.fillText(uName + '→', w - 24, Math.min(Math.max(origin.y - 4, 12), h - 4));
       ctx.fillText(vName + '↑', Math.min(Math.max(origin.x + 4, 4), w - 24), 14);
     }
 
-    /** Approximate XZ material section: fill under cut profile (upper side, X>0) */
+    /** Approximate material section in XZ or ZX (fill between axis and outer profile) */
     _drawSection(ctx) {
       if (!this.segments.length) return;
-      // Collect outermost cut X at sampled Z from executed path
       const cuts = this.segments.filter(s =>
         s.type === 'cut' || (s.lathe === 'G76' && s.thread)
       );
@@ -1419,7 +1427,7 @@ M30`
         pts.push({ x: s.from.x, z: s.from.z });
         pts.push({ x: s.to.x, z: s.to.z });
       });
-      // Sort by Z, keep max |X| envelope (diameter side)
+      // Sort along Z, keep max X envelope
       pts.sort((a, b) => a.z - b.z);
       const envelope = [];
       let i = 0;
@@ -1434,19 +1442,25 @@ M30`
       }
       if (envelope.length < 2) return;
 
+      // Map to screen via current plane projection
+      const toUV = (x, z) => this.plane === 'zx' ? { u: z, v: x } : { u: x, v: z };
+
       ctx.beginPath();
-      const first = this._worldToScreen(envelope[0].x, envelope[0].z);
-      // start from axis
-      const axis0 = this._worldToScreen(0, envelope[0].z);
-      ctx.moveTo(axis0.x, axis0.y);
-      ctx.lineTo(first.x, first.y);
+      const e0 = toUV(envelope[0].x, envelope[0].z);
+      const ax0 = toUV(0, envelope[0].z);
+      const s0 = this._worldToScreen(e0.u, e0.v);
+      const a0 = this._worldToScreen(ax0.u, ax0.v);
+      ctx.moveTo(a0.x, a0.y);
+      ctx.lineTo(s0.x, s0.y);
       for (let k = 1; k < envelope.length; k++) {
-        const p = this._worldToScreen(envelope[k].x, envelope[k].z);
+        const e = toUV(envelope[k].x, envelope[k].z);
+        const p = this._worldToScreen(e.u, e.v);
         ctx.lineTo(p.x, p.y);
       }
       const last = envelope[envelope.length - 1];
-      const axis1 = this._worldToScreen(0, last.z);
-      ctx.lineTo(axis1.x, axis1.y);
+      const ax1 = toUV(0, last.z);
+      const a1 = this._worldToScreen(ax1.u, ax1.v);
+      ctx.lineTo(a1.x, a1.y);
       ctx.closePath();
       ctx.fillStyle = 'rgba(100, 116, 139, 0.35)';
       ctx.fill();
@@ -2649,10 +2663,10 @@ M30`
       on('trace-section', 'change', (e) => {
         if (this.trace) {
           this.trace.setSectionMode(e.target.checked);
-          if (e.target.checked && this.trace.plane !== 'xz') {
-            this.trace.setPlane('xz');
+          if (e.target.checked && this.trace.plane !== 'xz' && this.trace.plane !== 'zx') {
+            this.trace.setPlane('zx');
             document.querySelectorAll('[data-trace-plane]').forEach(b => {
-              b.classList.toggle('active', b.dataset.tracePlane === 'xz');
+              b.classList.toggle('active', b.dataset.tracePlane === 'zx');
             });
           }
         }
