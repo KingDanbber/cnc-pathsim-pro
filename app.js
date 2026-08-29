@@ -368,6 +368,57 @@ G76 P020060 Q100 R0.05
 G76 X10.106 Z-20 P947 Q200 F1.75
 G0 X20 Z5
 M5
+M30`,
+
+    g70: `; Torno — G71 desbaste + G70 acabado
+G21 G90 G18
+G54
+T1 M6
+S1200 M3
+G0 X42 Z2
+; Desbaste (DOC radio U)
+G71 U1.5 R0.5
+G0 X40 Z0
+G1 Z-25 F0.25
+G1 X28
+G1 Z-35
+G0 X42
+; Acabado una pasada
+G70
+G0 X28 Z0
+G1 Z-25 F0.12
+G1 X20
+G1 Z-35
+G0 X42 Z5
+M5
+M30`,
+
+    g92: `; Torno — G92 roscado simple (una pasada)
+G21 G90 G18
+G54
+T3 M6
+S500 M3
+G0 X14 Z3
+G92 X10.2 Z-18 F1.5
+G0 X20 Z5
+M5
+M30`,
+
+    g32: `; Torno — G32 rosca sincronizada (simplificado)
+G21 G90 G18
+G54
+T3 M6
+S400 M3
+G0 X12 Z2
+G0 X10.2
+G32 Z-20 F1.5
+G0 X16
+G0 Z2
+; Segunda pasada más profunda
+G0 X9.8
+G33 Z-20 F1.5
+G0 X20 Z5
+M5
 M30`
   };
 
@@ -784,12 +835,42 @@ M30`
           if (words.F !== undefined) s.f = words.F; // pitch
           changed = true;
         }
+        else if (g === 70) {
+          // Finish pass after G71/G72 — single-pass profile (no DOC expansion)
+          s.latheMode = 'G70';
+          s.latheU = 0;
+          s.latheW = 0;
+          if (words.P !== undefined) s.g70P = Math.floor(words.P);
+          if (words.Q !== undefined) s.g70Q = Math.floor(words.Q);
+          changed = true;
+        }
+        else if (g === 92) {
+          // Simple threading cycle (one pass per block)
+          s.latheMode = 'G92';
+          if (words.F !== undefined) s.f = words.F;
+          changed = true;
+        }
+        else if (g === 32 || g === 33) {
+          // Threading with spindle sync (simplified → single cut @ pitch feed)
+          s.motion = g === 32 ? 'G32' : 'G33';
+          s.latheMode = g === 32 ? 'G32' : 'G33';
+          if (words.F !== undefined) s.f = words.F;
+          changed = true;
+        }
         else if (g >= 54 && g <= 59) { s.wcs = 'G' + g; }
       }
 
       // G76 second block with X/Z → expand threading passes
       if (words.G === 76 && (words.X !== undefined || words.Z !== undefined)) {
         return this._expandG76(lineNum, raw, words);
+      }
+      // G92 X/Z → single thread pass
+      if (words.G === 92 && (words.X !== undefined || words.Z !== undefined)) {
+        return this._expandG92(lineNum, raw, words);
+      }
+      // G70 with explicit X/Z → one finish cut
+      if (words.G === 70 && (words.X !== undefined || words.Z !== undefined)) {
+        return this._expandG70Move(lineNum, raw, words);
       }
       if (words.D !== undefined) s.compD = words.D;
 
@@ -872,10 +953,48 @@ M30`
       if (s.motion === 'G1') type = 'cut';
       else if (s.motion === 'G2') type = 'arc-cw';
       else if (s.motion === 'G3') type = 'arc-ccw';
+      else if (s.motion === 'G32' || s.motion === 'G33') type = 'cut';
 
       let arc = null;
       if (type.startsWith('arc')) {
         arc = this._computeArc(from, to, words, type, s.plane);
+      }
+
+      // G32/G33: synchronized thread move (single pass along path)
+      if ((s.motion === 'G32' || s.motion === 'G33') && moved) {
+        const pitch = s.f > 0 ? s.f : (words.F || 1);
+        const segs = [];
+        // Fine trail along major axis of move
+        const steps = Math.max(4, Math.ceil(
+          Math.sqrt(
+            Math.pow(to.x - from.x, 2) + Math.pow(to.z - from.z, 2)
+          ) / Math.max(pitch * 0.4, 0.3)
+        ));
+        let cur = { ...from };
+        for (let k = 1; k <= steps; k++) {
+          const t = k / steps;
+          const next = {
+            x: from.x + (to.x - from.x) * t,
+            y: from.y + (to.y - from.y) * t,
+            z: from.z + (to.z - from.z) * t,
+            a: to.a, c: to.c
+          };
+          segs.push(this._makeSeg(lineNum, raw, 'cut', cur, next, {
+            lathe: s.motion, feed: pitch, words, thread: true, passLabel: s.motion
+          }));
+          cur = next;
+        }
+        this.stats.cycles++;
+        return segs;
+      }
+
+      // G70 finish: never multi-pass expand
+      if (s.latheMode === 'G70' && type === 'cut' && moved) {
+        const seg = this._makeSeg(lineNum, raw, 'cut', from, to, {
+          arc, words, plane: s.plane, tool: s.tool, feed: s.f,
+          lathe: 'G70', passLabel: 'G70'
+        });
+        return [seg];
       }
 
       // Visual expansion G71/G72 (approximate multi-pass)
@@ -931,6 +1050,70 @@ M30`
         comp: s.comp, compD: s.compD
       });
       return [seg];
+    }
+
+    _expandG70Move(lineNum, raw, words) {
+      const s = this.state;
+      const from = { x: s.x, y: s.y, z: s.z, a: s.a, c: s.c };
+      const to = { ...from };
+      if (words.X !== undefined) to.x = s.absolute ? words.X : from.x + words.X;
+      if (words.Z !== undefined) to.z = s.absolute ? words.Z : from.z + words.Z;
+      if (words.Y !== undefined) to.y = s.absolute ? words.Y : from.y + words.Y;
+      if (words.F !== undefined) s.f = words.F;
+      s.x = to.x; s.y = to.y; s.z = to.z;
+      this.stats.cycles++;
+      return [this._makeSeg(lineNum, raw, 'cut', from, to, {
+        lathe: 'G70', feed: s.f, words, passLabel: 'G70'
+      })];
+    }
+
+    /** G92 single-pass threading cycle (visual) */
+    _expandG92(lineNum, raw, words) {
+      const s = this.state;
+      const from = { x: s.x, y: s.y, z: s.z, a: s.a, c: s.c };
+      let endX = from.x, endZ = from.z;
+      if (words.X !== undefined) endX = s.absolute ? words.X : from.x + words.X;
+      if (words.Z !== undefined) endZ = s.absolute ? words.Z : from.z + words.Z;
+      if (words.F !== undefined) s.f = words.F;
+      const pitch = s.f > 0 ? s.f : 1.5;
+      const clearX = Math.max(from.x, endX) + 2;
+      const zStart = from.z;
+      const segs = [];
+      let cur = { ...from };
+
+      // Rapid to thread diameter at start Z
+      const toStart = { x: endX, y: cur.y, z: zStart, a: cur.a, c: cur.c };
+      segs.push(this._makeSeg(lineNum, raw, 'rapid', cur, toStart, {
+        lathe: 'G92', passLabel: 'G92'
+      }));
+      cur = toStart;
+
+      // One synchronized pass along Z
+      const steps = Math.max(4, Math.ceil(Math.abs(endZ - zStart) / Math.max(pitch * 0.4, 0.25)));
+      for (let k = 1; k <= steps; k++) {
+        const t = k / steps;
+        const next = {
+          x: endX, y: cur.y,
+          z: zStart + (endZ - zStart) * t,
+          a: cur.a, c: cur.c
+        };
+        segs.push(this._makeSeg(lineNum, raw, 'cut', cur, next, {
+          lathe: 'G92', feed: pitch, words, thread: true, passLabel: 'G92'
+        }));
+        cur = next;
+      }
+
+      // Retract
+      const toClear = { x: clearX, y: cur.y, z: endZ, a: cur.a, c: cur.c };
+      segs.push(this._makeSeg(lineNum, raw, 'rapid', cur, toClear, { lathe: 'G92' }));
+      cur = toClear;
+      const toZ0 = { x: clearX, y: cur.y, z: zStart, a: cur.a, c: cur.c };
+      segs.push(this._makeSeg(lineNum, raw, 'rapid', cur, toZ0, { lathe: 'G92' }));
+      cur = toZ0;
+
+      s.x = cur.x; s.y = cur.y; s.z = cur.z;
+      this.stats.cycles++;
+      return segs;
     }
 
     _expandG76(lineNum, raw, words) {
@@ -2967,7 +3150,8 @@ M30`
       this._pushHistory();
       this._autosave(false);
       this._reparse();
-      if (name === 'lathe' || name === 'latheface' || name === 'g76') {
+      if (name === 'lathe' || name === 'latheface' || name === 'g76' ||
+          name === 'g70' || name === 'g92' || name === 'g32') {
         this.machine = 'lathe';
         document.querySelectorAll('.machine-tabs .tab').forEach(b => {
           b.classList.toggle('active', b.dataset.machine === 'lathe');
@@ -3130,7 +3314,7 @@ M30`
       const knownG = {
         0:1,1:1,2:1,3:1,17:1,18:1,19:1,20:1,21:1,28:1,40:1,41:1,42:1,
         54:1,55:1,56:1,57:1,58:1,59:1,80:1,81:1,82:1,83:1,84:1,85:1,86:1,89:1,
-        90:1,91:1,98:1,99:1,71:1,72:1,76:1
+        90:1,91:1,98:1,99:1,32:1,33:1,70:1,71:1,72:1,76:1,92:1
       };
       let lastMotion = 'G0';
       let sawTool = false;
